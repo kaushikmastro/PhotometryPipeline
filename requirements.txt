@@ -1,0 +1,18 @@
+# For use with pip and virtual environments.
+# You can generate this file from your conda environment.yml using:
+# conda env export --from-history | grep -v "^prefix:" > environment.yml
+#
+# Or by running `pip freeze > requirements.txt` in an active virtual environment.
+
+# Example packages - replace with your actual dependencies
+numpy
+scipy
+pandas
+matplotlib
+emcee
+corner
+spiceypy
+pyarrow
+planetaryimage
+pvl
+requests

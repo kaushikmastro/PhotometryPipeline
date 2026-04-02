@@ -1,0 +1,31 @@
+# Example configuration for a modeling experiment
+# Use this to define parameters for your models, data, and training runs.
+
+# Data configuration
+data:
+  raw_data_path: "data/raw/"
+  processed_data_path: "data/processed/"
+  # Add other data-related parameters here, e.g., feature lists
+
+# Model parameters for Hapke model
+model:
+  name: "hapke_2002"
+  parameters:
+    # Example parameters - replace with actual model parameters
+    w: 0.5
+    b: 0.5
+    c: 0.5
+    h: 0.1
+    B0: 1.0
+
+# MCMC Sampler configuration
+sampler:
+  name: "emcee"
+  nwalkers: 100
+  nsteps: 5000
+  burnin: 1000
+
+# Experiment tracking
+experiment:
+  name: "experiment_run_001"
+  description: "Initial run with baseline parameters."

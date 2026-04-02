@@ -1,0 +1,14 @@
+name: photomc_env
+channels:
+  - conda-forge
+  - nodefaults
+dependencies:
+  - python=3.11
+  - numpy
+  - scipy
+  - pandas
+  - xarray
+  - pymc >= 5.0
+  - spiceypy
+  - ipykernel
+  - pip
