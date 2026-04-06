@@ -40,6 +40,7 @@ class TestDataManager(unittest.TestCase):
         self.data_root = self.root / "data"
         (self.data_root / "01_calibrated_images").mkdir(parents=True, exist_ok=True)
         (self.data_root / "02_spice_kernels").mkdir(parents=True, exist_ok=True)
+        (self.data_root / "03_dtm").mkdir(parents=True, exist_ok=True)
 
         with self.manifest.open("w", newline="") as fh:
             writer = csv.writer(fh)
@@ -161,6 +162,115 @@ KERNELS_TO_LOAD = (
 
         self.assertTrue(target.exists())
         self.assertEqual(mock_get.call_count, 3)
+
+    @patch("hapke_mcmc_package.etl.ingestion.Path.resolve", return_value=Path("/scratch/test_data"))
+    @patch("hapke_mcmc_package.etl.ingestion.DataManager._list_remote_directory_filtered")
+    @patch("hapke_mcmc_package.etl.ingestion.DataManager._download_file_with_retries")
+    def test_download_dtm_geometry_metadata_uses_exact_archive_path(
+        self,
+        mock_download,
+        mock_list,
+        _mock_resolve,
+    ):
+        manager = DataManager(str(self.manifest), str(self.data_root))
+
+        img_url = "https://sbnarchive.psi.edu/pds3/dawn/fc/DWNVSPG_2/DATA/SHAPE/VESTA_HAMO_DTM_93M.IMG"
+        mock_list.return_value = ([img_url], [])
+
+        def fake_download(url, destination, max_retries=3):
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(b"ok")
+            return True
+
+        mock_download.side_effect = fake_download
+        ok = manager._find_and_download_dtm(max_depth=1, max_dirs=1)
+
+        self.assertTrue(ok)
+        self.assertTrue((self.data_root / "03_dtm" / "VESTA_HAMO_DTM_93M.IMG").exists())
+        self.assertTrue((self.data_root / "03_dtm" / "dawn_vesta_SPG20160901.lbl").exists())
+        self.assertTrue((self.data_root / "03_dtm" / "dawn_vesta_SPG20160901.tpc").exists())
+        called_urls = [call.args[0] for call in mock_download.call_args_list]
+        self.assertIn("https://sbnarchive.psi.edu/pds3/dawn/fc/DWNVSPG_2/GEOMETRY/dawn_vesta_SPG20160901.lbl", called_urls)
+        self.assertIn("https://sbnarchive.psi.edu/pds3/dawn/fc/DWNVSPG_2/GEOMETRY/dawn_vesta_SPG20160901.tpc", called_urls)
+
+    @patch("hapke_mcmc_package.etl.ingestion.Path.resolve", return_value=Path("/scratch/test_data"))
+    @patch("hapke_mcmc_package.etl.ingestion.DataManager._list_remote_directory_filtered")
+    @patch("hapke_mcmc_package.etl.ingestion.DataManager._download_file_with_retries")
+    def test_find_and_download_dtm_removes_orphaned_img_before_crawl(
+        self,
+        mock_download,
+        mock_list,
+        _mock_resolve,
+    ):
+        manager = DataManager(str(self.manifest), str(self.data_root))
+
+        orphan = self.data_root / "03_dtm" / "ORPHAN_DTM.IMG"
+        orphan.write_bytes(b"old")
+
+        img_url = "https://sbnarchive.psi.edu/pds3/dawn/fc/DWNVSPG_2/DATA/SHAPE/VESTA_HAMO_DTM_93M.IMG"
+        mock_list.return_value = ([img_url], [])
+
+        def fake_download(url, destination, max_retries=3):
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(b"ok")
+            if destination.suffix.upper() == ".LBL":
+                destination.write_text("label", encoding="utf-8")
+            return True
+
+        mock_download.side_effect = fake_download
+        ok = manager._find_and_download_dtm(max_depth=1, max_dirs=1)
+
+        self.assertTrue(ok)
+        self.assertFalse(orphan.exists())
+
+    @patch("hapke_mcmc_package.etl.ingestion.Path.resolve", return_value=Path("/scratch/test_data"))
+    @patch("hapke_mcmc_package.etl.ingestion.DataManager._download_file_with_retries")
+    def test_find_and_download_dtm_preserves_existing_imgs_when_geometry_ready(
+        self,
+        mock_download,
+        _mock_resolve,
+    ):
+        manager = DataManager(str(self.manifest), str(self.data_root))
+
+        img = self.data_root / "03_dtm" / "VE_HAMO_G_00N_330E_EQU_DTM.IMG"
+        img.write_bytes(b"existing")
+        (self.data_root / "03_dtm" / "dawn_vesta_SPG20160901.lbl").write_text("lbl", encoding="utf-8")
+        (self.data_root / "03_dtm" / "dawn_vesta_SPG20160901.tpc").write_text("tpc", encoding="utf-8")
+
+        ok = manager._find_and_download_dtm(max_depth=1, max_dirs=1)
+
+        self.assertTrue(ok)
+        self.assertTrue(img.exists())
+        mock_download.assert_not_called()
+
+    @patch("hapke_mcmc_package.etl.ingestion.Path.resolve", return_value=Path("/scratch/test_data"))
+    @patch("hapke_mcmc_package.etl.ingestion.DataManager._list_remote_directory_filtered")
+    @patch("hapke_mcmc_package.etl.ingestion.DataManager._download_file_with_retries")
+    def test_find_and_download_dtm_raises_when_geometry_metadata_unavailable(
+        self,
+        mock_download,
+        mock_list,
+        _mock_resolve,
+    ):
+        manager = DataManager(str(self.manifest), str(self.data_root))
+
+        img_url = "https://sbnarchive.psi.edu/pds3/dawn/fc/DWNVSPG_2/DATA/SHAPE/VESTA_HAMO_DTM_93M.IMG"
+        mock_list.return_value = ([img_url], [])
+
+        def fake_download(url, destination, max_retries=3):
+            if url.endswith(".IMG"):
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes(b"ok")
+                return True
+            return False
+
+        mock_download.side_effect = fake_download
+        with self.assertRaises(RuntimeError):
+            manager._find_and_download_dtm(max_depth=1, max_dirs=1)
+
+        self.assertTrue((self.data_root / "03_dtm" / "VESTA_HAMO_DTM_93M.IMG").exists())
+        self.assertFalse((self.data_root / "03_dtm" / "dawn_vesta_SPG20160901.lbl").exists())
+        self.assertFalse((self.data_root / "03_dtm" / "dawn_vesta_SPG20160901.tpc").exists())
 
 
 if __name__ == "__main__":

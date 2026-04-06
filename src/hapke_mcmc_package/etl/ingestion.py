@@ -5,7 +5,7 @@ import requests
 import time
 from typing import Dict, List, Tuple
 import re
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin, urlparse, urlsplit, urlunsplit
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -28,9 +28,16 @@ class DataManager:
         self.data_root = Path(data_root)
         self.image_dir = self.data_root / "01_calibrated_images"
         self.spice_dir = self.data_root / "02_spice_kernels"
+        self.dtm_dir = self.data_root / "03_dtm"
+        self.dtm_geometry_label_url = "https://sbnarchive.psi.edu/pds3/dawn/fc/DWNVSPG_2/GEOMETRY/dawn_vesta_SPG20160901.lbl"
+        self.dtm_geometry_pck_url = "https://sbnarchive.psi.edu/pds3/dawn/fc/DWNVSPG_2/GEOMETRY/dawn_vesta_SPG20160901.tpc"
+        self.dtm_geometry_label_name = "dawn_vesta_SPG20160901.lbl"
+        self.dtm_geometry_pck_name = "dawn_vesta_SPG20160901.tpc"
         self.pds_base_url = pds_base_url
         self.naif_base_url = "https://naif.jpl.nasa.gov/pub/naif/DAWN/kernels/"
         self.fc_base_url = "https://sbnarchive.psi.edu/pds3/dawn/fc/DWNVFC2_1B/DATA/IMG/"
+        self.dtm_base_url = "https://sbnarchive.psi.edu/pds3/dawn/fc/DWNVSPG_2/DATA/"
+        self.dtm_required_subpath = "/pds3/dawn/fc/DWNVSPG_2/DATA/"
         self.naif_pds_bundle_base = "https://naif.jpl.nasa.gov/pub/naif/pds/data/dawn-m_a-spice-6-v1.0/dawnsp_1000/"
         self._dir_cache: Dict[str, Tuple[List[str], List[str]]] = {}
         
@@ -83,13 +90,14 @@ class DataManager:
         lbl_urls = [f"{base_url}{directory}{lbl_name}" for directory in dirs]
         return img_urls, lbl_urls
 
-    def _list_remote_directory(self, url: str) -> Tuple[List[str], List[str]]:
+    def _list_remote_directory_filtered(self, url: str, required_subpath: str | None = None) -> Tuple[List[str], List[str]]:
         """Return (file_hrefs, dir_hrefs) from a simple HTML directory listing."""
         if not url.endswith("/"):
             url = f"{url}/"
 
-        if url in self._dir_cache:
-            return self._dir_cache[url]
+        cache_key = f"{url}|{required_subpath or '*'}"
+        if cache_key in self._dir_cache:
+            return self._dir_cache[cache_key]
 
         files: List[str] = []
         dirs: List[str] = []
@@ -107,10 +115,10 @@ class DataManager:
                 full = urljoin(url, href)
                 parsed_full = urlparse(full)
 
-                # Keep crawl constrained to same host and under expected FC data tree.
+                # Keep crawl constrained to same host and expected subtree.
                 if parsed_full.netloc != parsed_root.netloc:
                     continue
-                if "/pds3/dawn/fc/DWNVFC2_1B/DATA/IMG/" not in parsed_full.path:
+                if required_subpath and required_subpath not in parsed_full.path:
                     continue
 
                 if href.endswith("/"):
@@ -121,8 +129,158 @@ class DataManager:
             # Quiet fallback: caller decides whether to continue exploring.
             pass
 
-        self._dir_cache[url] = (files, dirs)
+        self._dir_cache[cache_key] = (files, dirs)
         return files, dirs
+
+    def _list_remote_directory(self, url: str) -> Tuple[List[str], List[str]]:
+        """FC image-specific directory listing helper."""
+        return self._list_remote_directory_filtered(
+            url,
+            required_subpath="/pds3/dawn/fc/DWNVFC2_1B/DATA/IMG/",
+        )
+
+    def _find_and_download_dtm(self, max_depth: int = 6, max_dirs: int = 500) -> bool:
+        """
+        Crawl Dawn SPG DATA index and download HAMO DTM IMG files plus bundle geometry metadata.
+
+        Returns:
+            bool: True if DTM IMG files and mandatory geometry metadata are present.
+        """
+        try:
+            resolved_data_root = self.data_root.resolve(strict=True)
+            if not str(resolved_data_root).startswith("/scratch/"):
+                logging.error(
+                    "Refusing DTM download: data_root resolves to %s, expected /scratch/...",
+                    resolved_data_root,
+                )
+                return False
+        except FileNotFoundError:
+            logging.error("Data root does not exist: %s", self.data_root)
+            return False
+
+        self.dtm_dir.mkdir(parents=True, exist_ok=True)
+        existing_imgs = list(self.dtm_dir.glob("*.IMG"))
+        geometry_ready = (
+            (self.dtm_dir / self.dtm_geometry_label_name).exists()
+            and (self.dtm_dir / self.dtm_geometry_pck_name).exists()
+        )
+
+        # Idempotency: if authoritative geometry metadata exists, preserve IMG files.
+        if existing_imgs and geometry_ready:
+            logging.info("DTM foundation already present in %s", self.dtm_dir)
+            return True
+
+        # Legacy cleanup path for stale pre-fix states without authoritative metadata.
+        if existing_imgs and not geometry_ready:
+            orphaned_imgs = [img for img in existing_imgs if not img.with_suffix(".LBL").exists()]
+            if orphaned_imgs:
+                for orphan in orphaned_imgs:
+                    logging.warning("Removing orphaned DTM IMG without matching LBL: %s", orphan)
+                    orphan.unlink()
+
+        existing_imgs = list(self.dtm_dir.glob("*.IMG"))
+        if existing_imgs:
+            if self._download_dtm_geometry_metadata():
+                logging.info("DTM foundation ready in %s", self.dtm_dir)
+                return True
+            raise RuntimeError("DTM geometry metadata is missing; cannot proceed with DTM foundation.")
+
+        queue: List[Tuple[str, int]] = [(self.dtm_base_url, 0)]
+        visited = set()
+        explored = 0
+        img_candidates: List[str] = []
+
+        while queue and explored < max_dirs:
+            current_url, depth = queue.pop(0)
+            if current_url in visited:
+                continue
+            visited.add(current_url)
+            explored += 1
+
+            files, dirs = self._list_remote_directory_filtered(current_url, required_subpath=self.dtm_required_subpath)
+            for file_url in files:
+                filename = Path(urlparse(file_url).path).name.upper()
+                if "HAMO" in filename and "DTM" in filename:
+                    if filename.endswith(".IMG"):
+                        img_candidates.append(file_url)
+
+            if depth >= max_depth:
+                continue
+
+            scored_dirs: List[Tuple[int, str]] = []
+            for d in dirs:
+                dirname = Path(urlparse(d).path.rstrip("/")).name.upper()
+                score = 0
+                if "DTM" in dirname:
+                    score += 3
+                if "HAMO" in dirname:
+                    score += 3
+                if "SHAPE" in dirname:
+                    score += 2
+                if "DATA" in dirname:
+                    score += 1
+                scored_dirs.append((score, d))
+
+            scored_dirs.sort(key=lambda item: item[0], reverse=True)
+            for _, d in scored_dirs:
+                if d not in visited:
+                    queue.append((d, depth + 1))
+
+        # De-duplicate while preserving order.
+        img_candidates = list(dict.fromkeys(img_candidates))
+
+        if not img_candidates:
+            logging.critical(
+                "DTM crawl failed to discover any HAMO/DTM IMG files under %s",
+                self.dtm_base_url,
+            )
+            raise RuntimeError(f"DTM crawl failed to discover any HAMO/DTM IMG files under {self.dtm_base_url}")
+
+        img_by_stem: Dict[str, List[str]] = {}
+        for u in img_candidates:
+            stem = Path(urlparse(u).path).stem.upper()
+            img_by_stem.setdefault(stem, []).append(u)
+
+        stems = sorted(img_by_stem.keys())
+
+        for stem in stems:
+            img_dest = self.dtm_dir / f"{stem}.IMG"
+
+            if img_dest.exists():
+                continue
+
+            img_ok = self._download_from_candidate_urls(img_by_stem[stem], img_dest)
+            if not img_ok:
+                logging.warning("Failed to download DTM IMG for %s", stem)
+                continue
+
+        if not self._download_dtm_geometry_metadata():
+            logging.critical("DTM geometry metadata download failed.")
+            raise RuntimeError("DTM geometry metadata download failed.")
+
+        logging.info("DTM foundation ready in %s", self.dtm_dir)
+        return True
+
+    def ensure_dtm_foundation(self) -> bool:
+        """Public API to ensure DTM foundation exists for downstream geometry workflows."""
+        return self._find_and_download_dtm()
+
+    def _download_dtm_geometry_metadata(self) -> bool:
+        """Download the authoritative DTM geometry label and PCK metadata files."""
+        self.dtm_dir.mkdir(parents=True, exist_ok=True)
+
+        label_dest = self.dtm_dir / self.dtm_geometry_label_name
+        pck_dest = self.dtm_dir / self.dtm_geometry_pck_name
+
+        label_ok = label_dest.exists() or self._download_file_with_retries(self.dtm_geometry_label_url, label_dest)
+        if not label_ok:
+            return False
+
+        pck_ok = pck_dest.exists() or self._download_file_with_retries(self.dtm_geometry_pck_url, pck_dest)
+        if not pck_ok:
+            return False
+
+        return True
 
     def _discover_image_urls(self, image_id: str, max_depth: int = 3, max_dirs: int = 200) -> Tuple[List[str], List[str]]:
         """
@@ -193,10 +351,10 @@ class DataManager:
         """Build likely LBL URLs from discovered IMG URLs in the same directories."""
         derived: List[str] = []
         for img_url in img_urls:
-            p = Path(img_url)
-            # Most PDS3 FC products use uppercase .LBL; include lowercase fallback.
-            derived.append(str(p.with_suffix(".LBL")))
-            derived.append(str(p.with_suffix(".lbl")))
+            parsed = urlsplit(img_url)
+            path = Path(parsed.path)
+            label_path = path.with_suffix(".LBL")
+            derived.append(urlunsplit((parsed.scheme, parsed.netloc, str(label_path), parsed.query, parsed.fragment)))
         return list(dict.fromkeys(derived))
 
     def _get_missing_images(self) -> list:
@@ -383,10 +541,15 @@ class DataManager:
 
     def download_spice_kernels(self) -> bool:
         """
-        Download the Vesta survey metakernel and only its required child kernels.
+        Download SPICE kernels including metakernel, child kernels, and reconstructed SPK.
 
+        This method:
+        1. Downloads the survey metakernel and its referenced child kernels
+        2. Downloads reconstructed spacecraft SPK kernels for mission coverage
+        3. Generates a dynamic metakernel that includes all available kernels
+        
         Returns:
-            bool: True if metakernel and all parsed child kernels are downloaded, else False.
+            bool: True if kernels are ready (either downloaded or previously cached).
         """
         try:
             resolved_data_root = self.data_root.resolve(strict=True)
@@ -402,43 +565,337 @@ class DataManager:
 
         self.spice_dir.mkdir(parents=True, exist_ok=True)
 
-        # Step 1: Download metakernel (.tm).
+        # Step 1: Check if we already have full-enough kernels from previous runs.
+        existing_spk = list(self.spice_dir.glob("*.bsp"))
+        existing_ck = list(self.spice_dir.glob("*.bc"))
+        dynamic_mk = self.spice_dir / "dawn_dynamic.tm"
+        has_2011_sc_ck = any(re.search(r"(?i)^dawn_sc_11\d{4}_\d{6}.*\.bc$", p.name) for p in existing_ck)
+        has_fc2_ck = any(re.search(r"(?i)^dawn_fc2_.*\.bc$", p.name) for p in existing_ck)
+        if existing_spk and existing_ck and dynamic_mk.exists() and (has_2011_sc_ck or has_fc2_ck):
+            logging.info(
+                "SPICE kernels already present with CK coverage markers; refreshing SCLK/CK and metakernel."
+            )
+            self._ensure_latest_sclk_kernel()
+            self._download_reconstructed_ck_kernels()
+            self._generate_dynamic_metakernel()
+            return True
+
+        # Step 2: Download metakernel (.tm).
         metakernel_urls = self._discover_metakernel_urls()
         metakernel_path = self._download_first_available(metakernel_urls, self.spice_dir)
         if metakernel_path is None:
-            logging.error("Unable to download any Vesta survey metakernel from NAIF.")
-            return False
+            logging.warning("Unable to download survey metakernel from NAIF, will proceed with reconstructed SPK only")
+        else:
+            logging.info("Downloaded metakernel: %s", metakernel_path)
 
-        logging.info("Downloaded metakernel: %s", metakernel_path)
-
-        # Step 2: Parse metakernel for required child kernels.
-        try:
-            mk_text = metakernel_path.read_text(encoding="utf-8", errors="ignore")
-        except OSError as exc:
-            logging.error("Failed reading metakernel %s: %s", metakernel_path, exc)
-            return False
-
-        kernel_refs = self._extract_kernel_paths_from_metakernel(mk_text)
-        if not kernel_refs:
-            logging.warning("Metakernel parsed but no child kernel references were found.")
-            return True
-
-        # Step 3: Construct URLs and download only required kernels.
-        all_ok = True
-        for kernel_ref in kernel_refs:
+            # Step 3: Parse metakernel for required child kernels.
             try:
-                kernel_url = self._construct_kernel_url(kernel_ref)
-            except ValueError as exc:
-                logging.warning("Skipping kernel reference %s: %s", kernel_ref, exc)
-                all_ok = False
+                mk_text = metakernel_path.read_text(encoding="utf-8", errors="ignore")
+            except OSError as exc:
+                logging.error("Failed reading metakernel %s: %s", metakernel_path, exc)
+                return False
+
+            kernel_refs = self._extract_kernel_paths_from_metakernel(mk_text)
+            if kernel_refs:
+                # Step 4: Construct URLs and download only required kernels.
+                for kernel_ref in kernel_refs:
+                    try:
+                        kernel_url = self._construct_kernel_url(kernel_ref)
+                    except ValueError as exc:
+                        logging.warning("Skipping kernel reference %s: %s", kernel_ref, exc)
+                        continue
+
+                    destination = self.spice_dir / Path(kernel_ref).name
+                    if not self._download_file_with_retries(kernel_url, destination, max_retries=3):
+                        logging.warning("Failed to download kernel %s (non-fatal)", kernel_ref)
+
+        # Step 5: Download reconstructed spacecraft SPK kernels for mission coverage
+        logging.info("Attempting to download reconstructed spacecraft SPK kernels...")
+        self._download_reconstructed_spk_kernels()
+
+        # Step 6: Download reconstructed spacecraft/instrument CK kernels for pointing coverage.
+        logging.info("Attempting to download reconstructed CK kernels for attitude coverage...")
+        self._download_reconstructed_ck_kernels()
+
+        # Step 7: Ensure latest SCLK (.tsc) is available for late-2011 attitude unlock.
+        logging.info("Ensuring latest DAWN SCLK kernel is available...")
+        self._ensure_latest_sclk_kernel()
+
+        # Step 8: Ensure de421.bsp (planetary positions) is available
+        planetary_bsp = self.spice_dir / "de421.bsp"
+        if not planetary_bsp.exists():
+            try:
+                de421_url = "https://naif.jpl.nasa.gov/pub/naif/generic_kernels/spk/planets/de421.bsp"
+                self._download_file_with_retries(de421_url, planetary_bsp, max_retries=2)
+            except Exception as exc:
+                logging.warning(f"Could not ensure de421.bsp: {exc}")
+
+        # Step 9: Generate dynamic metakernel that includes all available kernels
+        self._generate_dynamic_metakernel()
+
+        logging.info("SPICE kernel setup complete")
+        return True
+
+    def _discover_reconstructed_spk_urls(self) -> List[str]:
+        """
+        Discover reconstructed spacecraft SPK kernels from NAIF archive for mission phases.
+
+        Returns:
+            List of candidate SPK URLs, prioritized by relevance.
+        """
+        candidates: List[str] = []
+        
+        # Check NAIF spk directory for reconstructed spacecraft position kernels
+        spk_base = f"{self.naif_base_url}spk/"
+        
+        try:
+            resp = requests.get(spk_base, timeout=30)
+            resp.raise_for_status()
+            
+            # Find files matching dawn*rec*.bsp or dawn_sc*.bsp patterns
+            rec_files = re.findall(
+                r'href=["\']([^"\']*(?:dawn[^"\']*rec[^"\']*|dawn_sc[\w_]*?)\.bsp)["\']',
+                resp.text,
+                flags=re.IGNORECASE
+            )
+            rec_files = list(dict.fromkeys([Path(f).name for f in rec_files]))  # De-dup
+            
+            for f in rec_files:
+                candidates.append(f"{spk_base}{f}")
+                
+            logging.info(f"Discovered {len(candidates)} reconstructed SPK kernel candidates")
+        except requests.exceptions.RequestException as exc:
+            logging.warning(f"Could not scan NAIF spk directory: {exc}")
+        
+        # Static fallback list for common reconstructed SPK files covering various mission phases
+        static_candidates = [
+            f"{spk_base}dawn_rec_070927_120201.bsp",
+            f"{spk_base}dawn_070927_071031_rec.bsp",
+            f"{spk_base}dawn_071101_120201_rec.bsp",
+            f"{spk_base}dawn_sc_071001_080106.bsp",
+            f"{spk_base}dawn_rec_2011_v1.bsp",
+            f"{spk_base}dawn_rec_combined.bsp",
+        ]
+        
+        candidates.extend(static_candidates)
+        return list(dict.fromkeys(candidates))  # De-duplicate while preserving order
+
+    def _download_reconstructed_spk_kernels(self) -> int:
+        """
+        Download reconstructed spacecraft SPK kernels for the full mission timeline.
+
+        Returns:
+            int: Number of successfully downloaded SPK kernels.
+        """
+        spk_urls = self._discover_reconstructed_spk_urls()
+        downloaded_count = 0
+        
+        for url in spk_urls:
+            destination = self.spice_dir / Path(url).name
+            
+            if destination.exists():
+                logging.info(f"Reconstructed SPK kernel already present: {destination.name}")
+                downloaded_count += 1
+                continue
+            
+            if self._download_file_with_retries(url, destination, max_retries=2):
+                logging.info(f"Successfully downloaded reconstructed SPK: {destination.name}")
+                downloaded_count += 1
+        
+        if downloaded_count > 0:
+            logging.info(f"Downloaded {downloaded_count} reconstructed SPK kernel(s)")
+        else:
+            logging.warning("No reconstructed SPK kernels were successfully downloaded")
+        
+        return downloaded_count
+
+    def _discover_reconstructed_ck_urls(self) -> List[str]:
+        """Discover CK kernels needed for 2011 Vesta FC2 pointing coverage."""
+        ck_base = f"{self.naif_base_url}ck/"
+        candidates: List[str] = []
+
+        try:
+            resp = requests.get(ck_base, timeout=30)
+            resp.raise_for_status()
+            names = sorted(set(re.findall(r'href=["\']([^"\']+\.bc)["\']', resp.text, flags=re.IGNORECASE)))
+
+            # Mission-week attitude kernels around Vesta encounter (2011) for spacecraft and solar arrays.
+            weekly_2011 = [
+                n for n in names
+                if re.search(r"(?i)^dawn_(?:sc|sa)_11\d{4}_\d{6}.*\.bc$", n)
+            ]
+            # FC2 CK is mission-interval instrument pointing and should be included when available.
+            fc2 = [n for n in names if re.search(r"(?i)^dawn_fc2_.*\.bc$", n)]
+            # Include quick-look 2011 segments as fallback/augment.
+            ql_2011 = [n for n in names if re.search(r"(?i)^dawn_ql_11\d{4}_\d{6}\.bc$", n)]
+
+            for n in weekly_2011 + fc2 + ql_2011:
+                candidates.append(f"{ck_base}{Path(n).name}")
+
+            logging.info("Discovered %d CK kernel candidates for 2011/FC2 coverage", len(candidates))
+        except requests.exceptions.RequestException as exc:
+            logging.warning("Could not scan NAIF ck directory: %s", exc)
+
+        # Conservative static fallback list (core weekly and FC2 coverage file).
+        static_fallback = [
+            f"{ck_base}dawn_sc_110801_110807.bc",
+            f"{ck_base}dawn_sc_110808_110814.bc",
+            f"{ck_base}dawn_sc_110815_110821.bc",
+            f"{ck_base}dawn_sc_110822_110828.bc",
+            f"{ck_base}dawn_sa_110801_110807.bc",
+            f"{ck_base}dawn_sa_110808_110814.bc",
+            f"{ck_base}dawn_sa_110815_110821.bc",
+            f"{ck_base}dawn_sa_110822_110828.bc",
+            f"{ck_base}dawn_fc2_110723_120725_grv221108_v1.bc",
+        ]
+        candidates.extend(static_fallback)
+        return list(dict.fromkeys(candidates))
+
+    def _discover_latest_sclk_url(self) -> str | None:
+        """Discover the latest DAWN SCLK kernel URL from NAIF sclk directory."""
+        sclk_base = f"{self.naif_base_url}sclk/"
+        try:
+            resp = requests.get(sclk_base, timeout=30)
+            resp.raise_for_status()
+            names = re.findall(r'href=["\']([^"\']+\.tsc)["\']', resp.text, flags=re.IGNORECASE)
+            names = [Path(n).name for n in names]
+            dawn_names = [n for n in names if re.match(r"(?i)^DAWN_203_SCLKSCET\.\d+\.tsc$", n)]
+            if not dawn_names:
+                return None
+
+            def _version_num(name: str) -> int:
+                m = re.search(r"\.(\d+)\.tsc$", name, flags=re.IGNORECASE)
+                return int(m.group(1)) if m else -1
+
+            latest = max(dawn_names, key=_version_num)
+            return f"{sclk_base}{latest}"
+        except requests.exceptions.RequestException as exc:
+            logging.warning("Could not discover latest SCLK from NAIF: %s", exc)
+            return None
+
+    def _ensure_latest_sclk_kernel(self) -> Path | None:
+        """Download the latest DAWN SCLK if available; return the local path."""
+        latest_url = self._discover_latest_sclk_url()
+        fallback_name = "DAWN_203_SCLKSCET.00091.tsc"
+
+        if latest_url is None:
+            latest_url = f"{self.naif_base_url}sclk/{fallback_name}"
+
+        dest = self.spice_dir / Path(latest_url).name
+        if not dest.exists():
+            if not self._download_file_with_retries(latest_url, dest, max_retries=3):
+                logging.warning("Could not download latest SCLK from %s", latest_url)
+                return None
+
+        logging.info("Latest SCLK available: %s", dest.name)
+        return dest
+
+    def _download_reconstructed_ck_kernels(self) -> int:
+        """Download reconstructed CK kernels needed for FC2 frame connectivity at 2011 epochs."""
+        ck_urls = self._discover_reconstructed_ck_urls()
+        downloaded_count = 0
+
+        for url in ck_urls:
+            destination = self.spice_dir / Path(url).name
+
+            if destination.exists():
+                downloaded_count += 1
                 continue
 
-            destination = self.spice_dir / Path(kernel_ref).name
-            if not self._download_file_with_retries(kernel_url, destination, max_retries=3):
-                logging.error("Failed to download required kernel %s", kernel_ref)
-                all_ok = False
+            if self._download_file_with_retries(url, destination, max_retries=2):
+                logging.info("Successfully downloaded CK: %s", destination.name)
+                downloaded_count += 1
 
-        return all_ok
+        if downloaded_count > 0:
+            logging.info("Downloaded/present CK kernels: %d", downloaded_count)
+        else:
+            logging.warning("No reconstructed CK kernels were successfully downloaded")
+
+        return downloaded_count
+
+    def _generate_dynamic_metakernel(self) -> Path:
+        """
+        Generate a dynamic metakernel (.tm file) that includes all available kernels.
+
+        This creates a metakernel text file that explicitly lists all .bsp, .bc, .tf, .ti
+        and .tsc files currently in the spice_dir, ensuring proper SPICE kernel loading
+        without path ambiguities.
+
+        Returns:
+            Path: The generated metakernel file path.
+        """
+        metakernel_path = self.spice_dir / "dawn_dynamic.tm"
+        
+        # Collect all kernel files by type
+        kernel_patterns = {
+            ".tls": "LSK",
+            ".tsc": "SCLK", 
+            ".tpc": "PCK",
+            ".tf": "FRAMES",
+            ".ti": "INSTRUMENT",
+            ".bsp": "SPK",
+            ".bc": "CK",
+        }
+        
+        kernel_files: Dict[str, List[Path]] = {ext: [] for ext in kernel_patterns}
+        
+        for ext, _ in kernel_patterns.items():
+            found = sorted(self.spice_dir.glob(f"*{ext}"))
+            # Also include DTM-specific geometry files
+            if ext == ".tpc":
+                found.extend(sorted(self.dtm_dir.glob(f"*{ext}")))
+                found = sorted(set(found))  # De-duplicate
+            kernel_files[ext] = found
+        
+        spice_root = str(self.spice_dir.resolve())
+        dtm_root = str(self.dtm_dir.resolve())
+
+        # Generate metakernel content with proper KPL format.
+        lines = [
+            "KPL/MK",
+            "",
+            "\\begindata",
+            "",
+            "PATH_VALUES = (",
+            f"  '{spice_root}',",
+            f"  '{dtm_root}'",
+            ")",
+            "",
+            "PATH_SYMBOLS = (",
+            "  'SPICE',",
+            "  'DTM'",
+            ")",
+            "",
+            "KERNELS_TO_LOAD = (",
+        ]
+        
+        kernel_list = []
+        
+        # Load in SPICE-recommended order
+        order = [".tls", ".tsc", ".tpc", ".tf", ".ti", ".bsp", ".bc"]
+        for ext in order:
+            for kernel_path in kernel_files.get(ext, []):
+                symbol = "DTM" if kernel_path.resolve().parent == self.dtm_dir.resolve() else "SPICE"
+                kernel_list.append(f"  '${symbol}/{kernel_path.name}'")
+        
+        if kernel_list:
+            lines.extend([",\n".join(kernel_list)])
+        
+        lines.extend([
+            ")",
+            "\\begintext",
+            "Dynamic metakernel generated for Vesta geometry computation.",
+            "Includes all available kernels in spice_dir and DTM geometry files.",
+            "\\endtext",
+        ])
+        
+        metakernel_content = "\n".join(lines)
+        metakernel_path.write_text(metakernel_content, encoding="utf-8")
+        
+        logging.info(f"Generated dynamic metakernel: {metakernel_path.name}")
+        logging.debug(f"Metakernel includes {len(kernel_list)} kernels")
+        
+        return metakernel_path
 
     def _download_file_with_retries(self, url: str, destination: Path, max_retries: int = 3) -> bool:
         """

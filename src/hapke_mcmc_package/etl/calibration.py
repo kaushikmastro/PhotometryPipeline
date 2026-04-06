@@ -1,10 +1,36 @@
 import numpy as np
-import planetaryimage
 import logging
 from pathlib import Path
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+
+def _load_planetaryimage_module():
+    """Load planetaryimage with a NumPy 2 compatibility shim when required."""
+    if not hasattr(np, "product"):
+        np.product = np.prod  # type: ignore[attr-defined]
+
+    try:
+        import planetaryimage
+
+        return planetaryimage
+    except ValueError as exc:
+        if "fromstring" not in str(exc):
+            raise
+
+        old_fromstring = np.fromstring
+
+        def _fromstring_compat(string, dtype=float, count=-1, sep=''):
+            if sep == '' and isinstance(string, (bytes, bytearray, memoryview)):
+                return np.frombuffer(string, dtype=dtype, count=count)
+            return old_fromstring(string, dtype=dtype, count=count, sep=sep)
+
+        np.fromstring = _fromstring_compat  # type: ignore[assignment]
+        import planetaryimage
+
+        logging.warning("Applied NumPy compatibility shim for planetaryimage import.")
+        return planetaryimage
 
 class ImageCalibrator:
     """
@@ -15,6 +41,7 @@ class ImageCalibrator:
         """
         Initializes the ImageCalibrator.
         """
+        self._planetaryimage = _load_planetaryimage_module()
         logging.info("ImageCalibrator initialized.")
 
     def clean_level1c_image(self, img_file_path: str) -> np.ndarray:
@@ -38,7 +65,7 @@ class ImageCalibrator:
 
         try:
             # 1. Use planetaryimage to open the PDS file
-            pds_image = planetaryimage.PDS3Image.open(str(file_path))
+            pds_image = self._planetaryimage.PDS3Image.open(str(file_path))
             
             # 2. Extract the 2D data array and ensure it's float32
             # We create a copy to avoid modifying the original object's data
