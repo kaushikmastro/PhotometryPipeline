@@ -5,13 +5,12 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SRC_DIR = PROJECT_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from hapke_mcmc_package.etl.ingestion import DataManager
+from hapke_mcmc_package.etl.ingestion import DataManager  # noqa: E402
 
 
 class DummyResponse:
@@ -86,7 +85,9 @@ class TestDataManager(unittest.TestCase):
 
         self.assertTrue(any(url.endswith("FC21A0001234.IMG") for url in img_urls))
         self.assertTrue(any(url.endswith("FC21A0001234.LBL") for url in lbl_urls))
-        self.assertTrue(img_urls[0].startswith("https://sbnarchive.psi.edu/pds3/dawn/fc/DWNVFC2_1B/DATA/IMG/"))
+        self.assertTrue(
+            img_urls[0].startswith("https://sbnarchive.psi.edu/pds3/dawn/fc/DWNVFC2_1B/DATA/IMG/")
+        )
 
     def test_extract_kernel_paths_from_metakernel(self):
         manager = DataManager(str(self.manifest), str(self.data_root))
@@ -110,7 +111,9 @@ KERNELS_TO_LOAD = (
         manager = DataManager(str(self.manifest), str(self.data_root))
         self.assertTrue(manager._construct_kernel_url("de440s.bsp").endswith("/spk/de440s.bsp"))
         self.assertTrue(manager._construct_kernel_url("dawn_fc.bc").endswith("/ck/dawn_fc.bc"))
-        self.assertTrue(manager._construct_kernel_url("dawn_vesta.tf").endswith("/fk/dawn_vesta.tf"))
+        self.assertTrue(
+            manager._construct_kernel_url("dawn_vesta.tf").endswith("/fk/dawn_vesta.tf")
+        )
         self.assertTrue(manager._construct_kernel_url("fc2.ti").endswith("/ik/fc2.ti"))
         self.assertTrue(manager._construct_kernel_url("dawn.tsc").endswith("/sclk/dawn.tsc"))
 
@@ -124,7 +127,9 @@ KERNELS_TO_LOAD = (
         _mock_resolve,
     ):
         manager = DataManager(str(self.manifest), str(self.data_root))
-        mock_discover.return_value = ["https://naif.jpl.nasa.gov/pub/naif/DAWN/kernels/mk/vesta_survey.tm"]
+        mock_discover.return_value = [
+            "https://naif.jpl.nasa.gov/pub/naif/DAWN/kernels/mk/vesta_survey.tm"
+        ]
 
         def fake_download(url, destination, max_retries=3):
             if destination.suffix.lower() == ".tm":
@@ -174,7 +179,9 @@ KERNELS_TO_LOAD = (
     ):
         manager = DataManager(str(self.manifest), str(self.data_root))
 
-        img_url = "https://sbnarchive.psi.edu/pds3/dawn/fc/DWNVSPG_2/DATA/SHAPE/VESTA_HAMO_DTM_93M.IMG"
+        img_url = (
+            "https://sbnarchive.psi.edu/pds3/dawn/fc/DWNVSPG_2/DATA/SHAPE/VESTA_HAMO_DTM_93M.IMG"
+        )
         mock_list.return_value = ([img_url], [])
 
         def fake_download(url, destination, max_retries=3):
@@ -190,8 +197,14 @@ KERNELS_TO_LOAD = (
         self.assertTrue((self.data_root / "03_dtm" / "dawn_vesta_SPG20160901.lbl").exists())
         self.assertTrue((self.data_root / "03_dtm" / "dawn_vesta_SPG20160901.tpc").exists())
         called_urls = [call.args[0] for call in mock_download.call_args_list]
-        self.assertIn("https://sbnarchive.psi.edu/pds3/dawn/fc/DWNVSPG_2/GEOMETRY/dawn_vesta_SPG20160901.lbl", called_urls)
-        self.assertIn("https://sbnarchive.psi.edu/pds3/dawn/fc/DWNVSPG_2/GEOMETRY/dawn_vesta_SPG20160901.tpc", called_urls)
+        self.assertIn(
+            "https://sbnarchive.psi.edu/pds3/dawn/fc/DWNVSPG_2/GEOMETRY/dawn_vesta_SPG20160901.lbl",
+            called_urls,
+        )
+        self.assertIn(
+            "https://sbnarchive.psi.edu/pds3/dawn/fc/DWNVSPG_2/GEOMETRY/dawn_vesta_SPG20160901.tpc",
+            called_urls,
+        )
 
     @patch("hapke_mcmc_package.etl.ingestion.Path.resolve", return_value=Path("/scratch/test_data"))
     @patch("hapke_mcmc_package.etl.ingestion.DataManager._list_remote_directory_filtered")
@@ -207,7 +220,9 @@ KERNELS_TO_LOAD = (
         orphan = self.data_root / "03_dtm" / "ORPHAN_DTM.IMG"
         orphan.write_bytes(b"old")
 
-        img_url = "https://sbnarchive.psi.edu/pds3/dawn/fc/DWNVSPG_2/DATA/SHAPE/VESTA_HAMO_DTM_93M.IMG"
+        img_url = (
+            "https://sbnarchive.psi.edu/pds3/dawn/fc/DWNVSPG_2/DATA/SHAPE/VESTA_HAMO_DTM_93M.IMG"
+        )
         mock_list.return_value = ([img_url], [])
 
         def fake_download(url, destination, max_retries=3):
@@ -234,8 +249,12 @@ KERNELS_TO_LOAD = (
 
         img = self.data_root / "03_dtm" / "VE_HAMO_G_00N_330E_EQU_DTM.IMG"
         img.write_bytes(b"existing")
-        (self.data_root / "03_dtm" / "dawn_vesta_SPG20160901.lbl").write_text("lbl", encoding="utf-8")
-        (self.data_root / "03_dtm" / "dawn_vesta_SPG20160901.tpc").write_text("tpc", encoding="utf-8")
+        (self.data_root / "03_dtm" / "dawn_vesta_SPG20160901.lbl").write_text(
+            "lbl", encoding="utf-8"
+        )
+        (self.data_root / "03_dtm" / "dawn_vesta_SPG20160901.tpc").write_text(
+            "tpc", encoding="utf-8"
+        )
 
         ok = manager._find_and_download_dtm(max_depth=1, max_dirs=1)
 
@@ -254,7 +273,9 @@ KERNELS_TO_LOAD = (
     ):
         manager = DataManager(str(self.manifest), str(self.data_root))
 
-        img_url = "https://sbnarchive.psi.edu/pds3/dawn/fc/DWNVSPG_2/DATA/SHAPE/VESTA_HAMO_DTM_93M.IMG"
+        img_url = (
+            "https://sbnarchive.psi.edu/pds3/dawn/fc/DWNVSPG_2/DATA/SHAPE/VESTA_HAMO_DTM_93M.IMG"
+        )
         mock_list.return_value = ([img_url], [])
 
         def fake_download(url, destination, max_retries=3):

@@ -1,4 +1,4 @@
-import spicepy as spice
-import numpy as np
-
 class VestaGeometry:
+    """Placeholder geometry utilities for Vesta surface calculations."""
+
+    pass

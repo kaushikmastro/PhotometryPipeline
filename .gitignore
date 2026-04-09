@@ -1,7 +1,12 @@
 # Python
 __pycache__/
+**/__pycache__/
 *.py[cod]
 *$py.class
+.pytest_cache/
+**/.pytest_cache/
+.ipynb_checkpoints/
+**/.ipynb_checkpoints/
 
 # Build artifacts
 build/
@@ -11,20 +16,28 @@ dist/
 
 # Environment
 .env
-.venv
+.env/
+.venv/
 venv/
 ENV/
 env/
 env.bak/
 venv.bak/
 
-# Data
-data
-data/
+# HPC / Slurm
+slurm-*.out
+slurm-*.err
 logs/
 
-# Notebooks
-.ipynb_checkpoints
+# Data / generated outputs
+data/
+output/
+
+# Local SPICE / metakernels
+*.tm
+!*.template.tm
+*.bsp
+*.bc
 
 # IDE / Editor
 .vscode/

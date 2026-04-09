@@ -12,7 +12,7 @@ SRC_DIR = PROJECT_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from hapke_mcmc_package.etl.ingestion import DataManager
+from hapke_mcmc_package.etl.ingestion import DataManager  # noqa: E402
 
 
 def configure_logging() -> None:
@@ -63,7 +63,11 @@ def main() -> int:
         logging.critical("DTM foundation step failed: %s", exc)
         return 6
 
-    if not any(dtm_dir.glob("*.IMG")) or not (dtm_dir / "dawn_vesta_SPG20160901.lbl").exists() or not (dtm_dir / "dawn_vesta_SPG20160901.tpc").exists():
+    if (
+        not any(dtm_dir.glob("*.IMG"))
+        or not (dtm_dir / "dawn_vesta_SPG20160901.lbl").exists()
+        or not (dtm_dir / "dawn_vesta_SPG20160901.tpc").exists()
+    ):
         print(
             "WARNING: DTM foundation is incomplete. Geometry Engine will fall back to Ellipsoid model, which is insufficient for Hapke Roughness."
         )
