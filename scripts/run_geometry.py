@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import atexit
 import logging
 import multiprocessing as mp
 import os
@@ -13,14 +14,14 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
+import spiceypy
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SRC_DIR = PROJECT_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from hapke_mcmc_package.etl.geometry_engine import GeometryEngine
-
+from hapke_mcmc_package.etl.geometry_engine import GeometryEngine  # noqa: E402
 
 logging.basicConfig(
     level=logging.INFO,
@@ -38,10 +39,15 @@ def _resolve_manifest_column(df: pd.DataFrame) -> str:
     raise KeyError("Manifest must include 'image_filename' or 'image_id'.")
 
 
-def _init_worker(data_root: str, metakernel_path: str | None) -> None:
+def _init_worker(data_root: str, metakernel_path: str, body_fixed_frame: str = "IAU_VESTA") -> None:
     """Initializer for each worker process; loads SPICE and DTM once per worker."""
     global _ENGINE
-    _ENGINE = GeometryEngine(data_root=data_root, metakernel_path=metakernel_path)
+    _ENGINE = GeometryEngine(
+        data_root=data_root,
+        metakernel_path=metakernel_path,
+        body_fixed_frame=body_fixed_frame,
+    )
+    atexit.register(spiceypy.kclear)
 
 
 def _process_one(image_file_path: str) -> dict[str, Any]:
@@ -120,8 +126,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--metakernel",
         type=str,
-        default=None,
-        help="Optional explicit metakernel path. Defaults to first *.tm in data/02_spice_kernels.",
+        required=True,
+        help="Explicit metakernel path (.tm) to furnish for the entire run.",
+    )
+    parser.add_argument(
+        "--body-fixed-frame",
+        type=str,
+        default="IAU_VESTA",
+        help="Body-fixed reference frame for geometry calculations (default: IAU_VESTA). "
+        "For high-resolution DSK models with localized frames, provide the DSK-native frame name.",
     )
     parser.add_argument(
         "--workers",
@@ -152,7 +165,9 @@ def main() -> int:
         return 4
 
     to_process, skipped = build_worklist(data_root, manifest_path)
-    logging.info("Geometry batch summary: %d queued, %d already done", len(to_process), len(skipped))
+    logging.info(
+        "Geometry batch summary: %d queued, %d already done", len(to_process), len(skipped)
+    )
 
     if not to_process:
         logging.info("No missing geometry tables. Nothing to do.")
@@ -161,54 +176,64 @@ def main() -> int:
     total = len(to_process)
     worker_count = max(1, min(int(args.workers), total))
     if worker_count != int(args.workers):
-        logging.info("Adjusting workers from %d to %d based on queued images=%d", int(args.workers), worker_count, total)
+        logging.info(
+            "Adjusting workers from %d to %d based on queued images=%d",
+            int(args.workers),
+            worker_count,
+            total,
+        )
 
     ok_count = 0
     err_count = 0
     t_start = time.time()
 
-    with mp.Pool(
-        processes=worker_count,
-        initializer=_init_worker,
-        initargs=(str(data_root), args.metakernel),
-    ) as pool:
-        for idx, result in enumerate(pool.imap_unordered(_process_one, to_process, chunksize=1), start=1):
-            if result["status"] == "ok":
-                ok_count += 1
-                logging.info(
-                    "[%d/%d] OK %s rows=%d time=%.1fs",
-                    idx,
-                    total,
-                    result["image_id"],
-                    result["rows"],
-                    result["seconds"],
-                )
-            else:
-                err_count += 1
-                logging.error(
-                    "[%d/%d] FAIL %s time=%.1fs error=%s",
-                    idx,
-                    total,
-                    result["image_id"],
-                    result["seconds"],
-                    result.get("error", "unknown"),
-                )
+    try:
+        with mp.Pool(
+            processes=worker_count,
+            initializer=_init_worker,
+            initargs=(str(data_root), args.metakernel, args.body_fixed_frame),
+        ) as pool:
+            for idx, result in enumerate(
+                pool.imap_unordered(_process_one, to_process, chunksize=1), start=1
+            ):
+                if result["status"] == "ok":
+                    ok_count += 1
+                    logging.info(
+                        "[%d/%d] OK %s rows=%d time=%.1fs",
+                        idx,
+                        total,
+                        result["image_id"],
+                        result["rows"],
+                        result["seconds"],
+                    )
+                else:
+                    err_count += 1
+                    logging.error(
+                        "[%d/%d] FAIL %s time=%.1fs error=%s",
+                        idx,
+                        total,
+                        result["image_id"],
+                        result["seconds"],
+                        result.get("error", "unknown"),
+                    )
 
-            elapsed = time.time() - t_start
-            rate = idx / elapsed if elapsed > 0 else 0.0
-            remaining = (total - idx) / rate if rate > 0 else float("inf")
-            if remaining != float("inf"):
-                logging.info(
-                    "Progress %.1f%% (%d/%d), throughput=%.3f img/s, ETA=%.1f min",
-                    100.0 * idx / total,
-                    idx,
-                    total,
-                    rate,
-                    remaining / 60.0,
-                )
+                elapsed = time.time() - t_start
+                rate = idx / elapsed if elapsed > 0 else 0.0
+                remaining = (total - idx) / rate if rate > 0 else float("inf")
+                if remaining != float("inf"):
+                    logging.info(
+                        "Progress %.1f%% (%d/%d), throughput=%.3f img/s, ETA=%.1f min",
+                        100.0 * idx / total,
+                        idx,
+                        total,
+                        rate,
+                        remaining / 60.0,
+                    )
 
-    logging.info("Geometry batch completed: ok=%d fail=%d total=%d", ok_count, err_count, total)
-    return 1 if err_count > 0 else 0
+        logging.info("Geometry batch completed: ok=%d fail=%d total=%d", ok_count, err_count, total)
+        return 1 if err_count > 0 else 0
+    finally:
+        spiceypy.kclear()
 
 
 if __name__ == "__main__":

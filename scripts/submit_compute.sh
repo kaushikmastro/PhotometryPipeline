@@ -22,4 +22,5 @@ else
 fi
 
 cd /home/kaushim07/photometry_mcmc_env
-python scripts/run_geometry.py --workers "${SLURM_CPUS_PER_TASK:-8}"
+METAKERNEL_PATH="/home/kaushim07/photometry_mcmc_env/data/02_spice_kernels/dawn_dynamic.tm"
+python scripts/run_geometry.py --workers "${SLURM_CPUS_PER_TASK:-8}" --metakernel "${METAKERNEL_PATH}"

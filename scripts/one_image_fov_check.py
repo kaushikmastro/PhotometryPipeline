@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
 import spiceypy
+
+METAKERNEL_PATH = Path("/home/kaushim07/photometry_mcmc_env/data/02_spice_kernels/dawn_dynamic.tm")
 
 
 def load_planetaryimage():
@@ -23,8 +25,8 @@ def load_planetaryimage():
 
         old_fromstring = np.fromstring
 
-        def _fromstring_compat(string, dtype=float, count=-1, sep=''):
-            if sep == '' and isinstance(string, (bytes, bytearray, memoryview)):
+        def _fromstring_compat(string, dtype=float, count=-1, sep=""):
+            if sep == "" and isinstance(string, (bytes, bytearray, memoryview)):
                 return np.frombuffer(string, dtype=dtype, count=count)
             return old_fromstring(string, dtype=dtype, count=count, sep=sep)
 
@@ -39,8 +41,8 @@ def to_spice_utc_string(value: str) -> str:
     try:
         dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
         if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")
+            dt = dt.replace(tzinfo=UTC)
+        return dt.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.%f")
     except ValueError:
         return text.replace(" ", "T")
 
@@ -97,76 +99,74 @@ def main() -> int:
     PDS3Image = load_planetaryimage()
 
     data_root = Path("/home/kaushim07/photometry_mcmc_env/data")
-    spice_dir = data_root / "02_spice_kernels"
     image_path = data_root / "01_calibrated_images" / "FC21B0003932_11223181943F1F.IMG"
 
-    # Load kernels in fallback order from local folder.
-    ordered_patterns = ["*.tls", "*.tsc", "*.tpc", "*.tf", "*.ti", "*.bsp", "*.bc"]
-    for pat in ordered_patterns:
-        for kernel in sorted(spice_dir.glob(pat)):
-            try:
-                spiceypy.furnsh(str(kernel))
-            except Exception:
-                continue
+    if not METAKERNEL_PATH.exists():
+        raise FileNotFoundError(f"Metakernel not found: {METAKERNEL_PATH}")
 
-    pds = PDS3Image.open(str(image_path))
-    et = extract_observation_et(pds.label)
-    image_shape = pds.image.shape
-
-    instrument = "DAWN_FC2"
-    target = "VESTA"
-    target_frame = "IAU_VESTA"
-    observer = "DAWN"
-    abcorr = "LT+S"
-
-    cam_id = spiceypy.bodn2c(instrument)
-    _, cam_frame, boresight, _, bounds = spiceypy.getfov(cam_id, 4)
-    cam_frame = cam_frame.decode().strip() if isinstance(cam_frame, bytes) else str(cam_frame)
-
-    center_ray = build_center_ray(np.asarray(bounds, dtype=np.float64), image_shape)
-
-    print(f"image={image_path.name}")
-    print(f"et={et:.6f}")
-    print(f"frame_check instrument={instrument} cam_frame={cam_frame} target_frame={target_frame}")
-    print("center_ray_cam", center_ray.tolist())
-    print("boresight_cam", np.asarray(boresight, dtype=np.float64).tolist())
+    spiceypy.furnsh(str(METAKERNEL_PATH))
 
     try:
-        in_fov = bool(
-            spiceypy.fovtrg(
-                instrument,
-                target,
+        pds = PDS3Image.open(str(image_path))
+        et = extract_observation_et(pds.label)
+        image_shape = pds.image.shape
+
+        instrument = "DAWN_FC2"
+        target = "VESTA"
+        target_frame = "IAU_VESTA"
+        observer = "DAWN"
+        abcorr = "LT+S"
+
+        cam_id = spiceypy.bodn2c(instrument)
+        _, cam_frame, boresight, _, bounds = spiceypy.getfov(cam_id, 4)
+        cam_frame = cam_frame.decode().strip() if isinstance(cam_frame, bytes) else str(cam_frame)
+
+        center_ray = build_center_ray(np.asarray(bounds, dtype=np.float64), image_shape)
+
+        print(f"image={image_path.name}")
+        print(f"et={et:.6f}")
+        print(
+            f"frame_check instrument={instrument} cam_frame={cam_frame} target_frame={target_frame}"
+        )
+        print("center_ray_cam", center_ray.tolist())
+        print("boresight_cam", np.asarray(boresight, dtype=np.float64).tolist())
+
+        try:
+            in_fov = bool(
+                spiceypy.fovtrg(
+                    instrument,
+                    target,
+                    "ELLIPSOID",
+                    target_frame,
+                    abcorr,
+                    observer,
+                    et,
+                )
+            )
+            print(f"fovtrg={in_fov}")
+        except Exception as exc:
+            print(f"fovtrg_error={exc}")
+
+        try:
+            spoint, _, _ = spiceypy.sincpt(
                 "ELLIPSOID",
+                target,
+                et,
                 target_frame,
                 abcorr,
                 observer,
-                et,
+                cam_frame,
+                center_ray,
             )
-        )
-        print(f"fovtrg={in_fov}")
-    except Exception as exc:
-        print(f"fovtrg_error={exc}")
-
-    try:
-        spoint, _, _ = spiceypy.sincpt(
-            "ELLIPSOID",
-            target,
-            et,
-            target_frame,
-            abcorr,
-            observer,
-            cam_frame,
-            center_ray,
-        )
-        spoint = np.asarray(spoint, dtype=np.float64)
-        print("sincpt_center_hit=True")
-        print("sincpt_spoint_km", spoint.tolist())
-    except Exception as exc:
-        print("sincpt_center_hit=False")
-        print(f"sincpt_error={exc}")
-
-    spiceypy.kclear()
-    return 0
+            spoint = np.asarray(spoint, dtype=np.float64)
+            print("sincpt_center_hit=True")
+            print("sincpt_spoint_km", spoint.tolist())
+        except Exception as exc:
+            print("sincpt_center_hit=False")
+            print(f"sincpt_error={exc}")
+        return 0
+    finally:
+        spiceypy.kclear()
 
 
 if __name__ == "__main__":
