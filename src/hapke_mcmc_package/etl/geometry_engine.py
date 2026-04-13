@@ -448,9 +448,9 @@ class GeometryEngine:
         emission = np.rad2deg(emission)
 
         if (
-            not np.isfinite(phase).all()
-            or not np.isfinite(incidence).all()
-            or not np.isfinite(emission).all()
+            not np.isfinite(phase).any()
+            or not np.isfinite(incidence).any()
+            or not np.isfinite(emission).any()
         ):
             raise RuntimeError(
                 f"FATAL GEOMETRY MISSING: non-finite illumination angles computed for {image_id}"
