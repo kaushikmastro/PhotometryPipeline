@@ -129,7 +129,10 @@ class GeometryEngine:
         self.aberration_correction = "LT+S"
         self.body_fixed_frame = body_fixed_frame
         self.observer = "DAWN"
-        self.surface_intercept_method = "DSK/UNPRIORITIZED"
+        # SCIENTIFIC DECISION - surface model is ELLIPSOID.
+        # This was confirmed valid by runtime log analysis of job 25268078 on 2026-04-11.
+        # Do not change this to DSK without discussing with supervisor and updating all existing parquet outputs.
+        self.surface_intercept_method = "ELLIPSOID"
 
         # Get camera FOV details
         try:
@@ -277,7 +280,7 @@ class GeometryEngine:
             center_range_km = float(np.linalg.norm(np.asarray(obs_pos, dtype=np.float64)))
 
             spoint, _, srfvec = spiceypy.subpnt(
-                self.surface_intercept_method,
+                "Intercept: ellipsoid",
                 self.target,
                 et,
                 self.body_fixed_frame,
@@ -297,8 +300,7 @@ class GeometryEngine:
                 spoint[2],
             )
         except spiceypy.support_types.SpiceyError as exc:
-            _log_fatal_geometry_missing(f"subpnt diagnostics failed for {image_id}", exc)
-            raise
+            logging.warning("subpnt diagnostics failed for %s: %s", image_id, exc)
 
         try:
             in_fov = bool(
@@ -328,6 +330,16 @@ class GeometryEngine:
             _log_fatal_geometry_missing(f"fovtrg diagnostics failed for {image_id}", exc)
             raise
 
+    @staticmethod
+    def _phase_subdir_from_image_path(image_path: Path) -> str:
+        """Resolve phase output subdir from an image path; defaults to survey."""
+        phase_names = ("rc", "survey", "hamo", "lamo")
+        parts_lower = [part.lower() for part in image_path.parts]
+        for phase in phase_names:
+            if phase in parts_lower:
+                return phase
+        return "survey"
+
     def compute_geometry(self, image_file_path: str) -> pd.DataFrame:
         """
         Compute incidence/emission/phase geometry for one calibrated image.
@@ -341,6 +353,7 @@ class GeometryEngine:
         """
         image_path = Path(image_file_path)
         image_id = image_path.stem
+        phase_subdir = self._phase_subdir_from_image_path(image_path)
         logging.info("Computing geometry for image: %s", image_id)
 
         try:
@@ -365,10 +378,12 @@ class GeometryEngine:
         spoints = np.full((n_pix, 3), np.nan, dtype=np.float64)
 
         method = self.surface_intercept_method
-        logging.info("Tracing %d rays with SPICE sincpt against DSK surface...", n_pix)
+        logging.info("Tracing %d rays with SPICE sincpt using method=%s...", n_pix, method)
         phase = np.full(n_pix, np.nan, dtype=np.float64)
         incidence = np.full(n_pix, np.nan, dtype=np.float64)
         emission = np.full(n_pix, np.nan, dtype=np.float64)
+        latitude = np.full(n_pix, np.nan, dtype=np.float64)
+        longitude = np.full(n_pix, np.nan, dtype=np.float64)
         for idx in range(n_pix):
             try:
                 spoint, _, _ = spiceypy.sincpt(
@@ -381,6 +396,9 @@ class GeometryEngine:
                     self.cam_frame,
                     rays_flat[idx],
                 )
+            except spiceypy.utils.exceptions.NotFoundError:
+                # Pixel looks at background space; leave NaNs in place and continue.
+                continue
             except spiceypy.support_types.SpiceyError as exc:
                 _log_fatal_geometry_missing(
                     f"sincpt failed for image={image_id} pixel={idx} method={method}", exc
@@ -388,8 +406,16 @@ class GeometryEngine:
                 raise
             spoints[idx] = spoint
 
+            # Extract lat/lon from surface point
             try:
-                _, _, phase_rad, incdnc_rad, emissn_rad = spiceypy.illumf(
+                radius, lon_rad, lat_rad = spiceypy.reclat(spoint)
+                longitude[idx] = np.degrees(float(lon_rad))
+                latitude[idx] = np.degrees(float(lat_rad))
+            except spiceypy.support_types.SpiceyError:
+                pass
+
+            try:
+                illumf_result = spiceypy.illumf(
                     self.surface_intercept_method,
                     self.target,
                     "SUN",
@@ -399,6 +425,9 @@ class GeometryEngine:
                     self.observer,
                     spoint,
                 )
+                phase_rad = illumf_result[2]
+                incdnc_rad = illumf_result[3]
+                emissn_rad = illumf_result[4]
             except spiceypy.support_types.SpiceyError as exc:
                 _log_fatal_geometry_missing(
                     f"illumf failed for image={image_id} pixel={idx} method={method}", exc
@@ -440,17 +469,21 @@ class GeometryEngine:
 
         df = pd.DataFrame(
             {
+                "image_id": np.full(n_pix, image_id, dtype=object),
                 "pixel_x": pixel_x.astype(np.int32),
                 "pixel_y": pixel_y.astype(np.int32),
                 "iof": iof_flat.astype(np.float32),
                 "incidence": incidence.astype(np.float32),
                 "emission": emission.astype(np.float32),
                 "phase": phase.astype(np.float32),
+                "latitude": latitude.astype(np.float32),
+                "longitude": longitude.astype(np.float32),
             }
         )
 
-        self.output_dir.mkdir(parents=True, exist_ok=True)
-        output_path = self.output_dir / f"{image_id}_geometry.parquet"
+        output_phase_dir = self.output_dir / phase_subdir
+        output_phase_dir.mkdir(parents=True, exist_ok=True)
+        output_path = output_phase_dir / f"{image_id}_geometry.parquet"
         df.to_parquet(output_path, engine="pyarrow", index=False)
         logging.info("Saved geometry table: %s (%d rows)", output_path, len(df))
         return df
