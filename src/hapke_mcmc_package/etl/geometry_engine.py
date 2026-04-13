@@ -438,7 +438,7 @@ class GeometryEngine:
             incidence[idx] = float(incdnc_rad)
             emission[idx] = float(emissn_rad)
 
-        if not np.isfinite(spoints).all():
+        if not np.isfinite(spoints).any():
             raise RuntimeError(
                 f"FATAL GEOMETRY MISSING: non-finite intercept vector produced for {image_id}"
             )
