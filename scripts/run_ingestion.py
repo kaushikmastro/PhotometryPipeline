@@ -56,6 +56,49 @@ def main() -> int:
         data_root=str(data_root),
     )
 
+    phase_col = "phase_subdir"
+    phase_mask = False
+    if phase_col in manager.manifest.columns:
+        phase_mask = manager.manifest[phase_col].astype(str).str.lower().isin(
+            {"rc", "survey", "hamo", "lamo"}
+        )
+
+    needs_refresh = (
+        manager.manifest.empty
+        or len(manager.manifest) < 5000
+        or "download_url" not in manager.manifest.columns
+        or "file_specification_name" not in manager.manifest.columns
+        or not bool(phase_mask.all())
+    )
+
+    if needs_refresh:
+        logging.info("Step 0/3: Syncing strict FC2/F1 manifest from Dawn FC archive.")
+        try:
+            synced_rows = manager.sync_fc2_f1_manifest_from_archive()
+            logging.info(
+                "Manifest sync complete: synced_rows=%d, manifest_rows=%d",
+                synced_rows,
+                len(manager.manifest),
+            )
+            if "download_url" in manager.manifest.columns:
+                logging.info("First 3 true URLs from manifest:")
+                for url in manager.manifest["download_url"].head(3).tolist():
+                    logging.info("%s", url)
+        except RuntimeError as exc:
+            logging.critical("Manifest FC2/F1 synchronization failed: %s", exc)
+            return 7
+    else:
+        logging.info(
+            "Step 0/3: Using existing local manifest snapshot with %d rows; enforcing FC2/F1 filter.",
+            len(manager.manifest),
+        )
+        filtered_rows = manager.enforce_fc2_f1_manifest_filter(write_back=True)
+        logging.info("Local manifest filter complete: filtered_rows=%d", filtered_rows)
+        if "download_url" in manager.manifest.columns:
+            logging.info("First 3 true URLs from manifest:")
+            for url in manager.manifest["download_url"].head(3).tolist():
+                logging.info("%s", url)
+
     logging.info("Step 1/3: Ensuring DTM foundation is present.")
     try:
         manager.ensure_dtm_foundation()

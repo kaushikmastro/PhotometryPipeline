@@ -95,6 +95,35 @@ def _log_fatal_geometry_missing(context: str, exc: Exception) -> None:
     logging.critical("FATAL GEOMETRY MISSING: %s: %s", context, exc, exc_info=True)
 
 
+def calibrate_iof_data(raw_image: np.ndarray, image_id: str) -> np.ndarray:
+    """Convert percent-like FC values to I/F ratio and enforce physics guardrails."""
+    iof_data = np.asarray(raw_image, dtype=np.float32) / np.float32(100.0)
+
+    finite_iof = iof_data[np.isfinite(iof_data)]
+    if finite_iof.size == 0:
+        raise RuntimeError(f"FATAL GEOMETRY MISSING: I/F array is entirely non-finite for {image_id}")
+
+    iof_min = float(np.min(finite_iof))
+    max_iof = float(np.max(finite_iof))
+    if iof_min < -0.01 or max_iof > 1.05:
+        raise RuntimeError(
+            "FATAL GEOMETRY MISSING: I/F guardrail violated after percent-to-ratio "
+            f"conversion for {image_id} (min={iof_min:.6f}, max={max_iof:.6f})."
+        )
+
+    if iof_min < 0.0 or max_iof > 1.0:
+        logging.warning(
+            "I/F outside strict physical bounds for %s (min=%.6f, max=%.6f); "
+            "clipping to [0.0, 1.0] within tolerance.",
+            image_id,
+            iof_min,
+            max_iof,
+        )
+        iof_data = np.clip(iof_data, 0.0, 1.0)
+
+    return iof_data
+
+
 class GeometryEngine:
     """
     Core SPICE-based ray-tracing engine to calculate photometric angles.
@@ -117,7 +146,15 @@ class GeometryEngine:
         self.output_dir = self.data_root / "04_geometry_tables"
         self._planetaryimage = _load_planetaryimage_module()
 
-        self.metakernel_path = Path(metakernel_path)
+        requested_metakernel_path = Path(metakernel_path)
+        dynamic_metakernel_path = self.spice_dir / "dawn_dynamic.tm"
+        if dynamic_metakernel_path.exists():
+            self.metakernel_path = dynamic_metakernel_path
+            logging.info("Preferring dynamic SPICE metakernel: %s", self.metakernel_path)
+        else:
+            self.metakernel_path = requested_metakernel_path
+            logging.info("Dynamic metakernel not found; using requested metakernel: %s", self.metakernel_path)
+
         if not self.metakernel_path.exists():
             raise FileNotFoundError(f"Metakernel not found: {self.metakernel_path}")
 
@@ -358,7 +395,8 @@ class GeometryEngine:
 
         try:
             pds_img = self._planetaryimage.PDS3Image.open(str(image_path))
-            iof_data = pds_img.image.astype(np.float32)
+            iof_data = calibrate_iof_data(pds_img.image, image_id)
+
             et = self._extract_observation_et(pds_img.label)
             logging.info("Loaded I/F and observation time from %s", image_path)
         except Exception as e:

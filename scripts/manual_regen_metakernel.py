@@ -10,7 +10,7 @@ METAKERNEL_PATH = KERNEL_DIR / "dawn_dynamic.tm"
 REQ_SC_1108 = str(KERNEL_DIR / "dawn_sc_110802-110831_110922_v1.bsp")
 REQ_SA_1108 = str(KERNEL_DIR / "dawn_sa_110808_110814.bc")
 
-EXT_ORDER = [".tsc", ".tpc", ".tf", ".ti", ".bsp", ".bc"]
+EXT_ORDER = [".tls", ".tsc", ".tpc", ".tf", ".ti", ".bsp", ".bc"]
 
 
 def main() -> int:
@@ -21,6 +21,11 @@ def main() -> int:
     for ext in EXT_ORDER:
         kernel_files.extend(sorted(p.resolve() for p in KERNEL_DIR.glob(f"*{ext}")))
 
+    ck_2012 = [kernel for kernel in kernel_files if kernel.suffix.lower() == ".bc" and "12" in kernel.name]
+    if ck_2012:
+        other_kernels = [kernel for kernel in kernel_files if kernel not in ck_2012]
+        kernel_files = other_kernels + ck_2012
+
     if not kernel_files:
         raise RuntimeError(f"No kernels found in {KERNEL_DIR} for extensions: {EXT_ORDER}")
 
@@ -30,13 +35,11 @@ def main() -> int:
         "\\begindata",
         "",
         "PATH_VALUES = (",
-        f"  '{REQ_SC_1108}',",
-        f"  '{REQ_SA_1108}'",
+        f"  '{KERNEL_DIR}'",
         ")",
         "",
         "PATH_SYMBOLS = (",
-        "  'REQ_SC_1108',",
-        "  'REQ_SA_1108'",
+        "  'SPICE'",
         ")",
         "",
         "KERNELS_TO_LOAD = (",
@@ -44,7 +47,8 @@ def main() -> int:
 
     for idx, kernel_path in enumerate(kernel_files):
         suffix = "," if idx < len(kernel_files) - 1 else ""
-        lines.append(f"  '{kernel_path}'{suffix}")
+        # Use short symbolized paths to prevent SPICE text-kernel line truncation.
+        lines.append(f"  '$SPICE/{kernel_path.name}'{suffix}")
 
     lines.extend(
         [

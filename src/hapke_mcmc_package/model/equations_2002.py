@@ -117,13 +117,16 @@ class HapkeModel:
         Returns:
             Union[float, np.ndarray]: The calculated reflectance (I/F).
         """
+        i, e, alpha = np.broadcast_arrays(i, e, alpha)
         mu0 = np.cos(i)
         mu = np.cos(e)
 
-        # Ensure angles are within valid physical range to avoid math errors
-        if np.any(mu0 <= 0) or np.any(mu <= 0):
-            # Reflectance is zero if light is at or below the horizon
-            return np.zeros_like(i)
+        # Reflectance is only defined where both illumination and viewing geometry
+        # are above the horizon. Invalid elements are masked out individually so a
+        # mixed array does not lose valid pixels.
+        valid_geometry = (mu0 > 0) & (mu > 0)
+        if not np.any(valid_geometry):
+            return np.zeros_like(mu0, dtype=float)
 
         pf = self.phase_function(alpha, g)
         B_sh = self.shoemaker_opposition_effect(alpha, B0, h)
@@ -136,5 +139,6 @@ class HapkeModel:
 
         # Full Hapke equation
         reflectance = (w / 4) * (mu0 / (mu0 + mu)) * ((pf * B_sh) + multi_scattering) * S
+        reflectance = np.where(valid_geometry, reflectance, 0.0)
 
         return reflectance

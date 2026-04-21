@@ -5,11 +5,13 @@ from __future__ import annotations
 
 import argparse
 import atexit
+import json
 import logging
 import multiprocessing as mp
 import os
 import sys
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +31,7 @@ logging.basicConfig(
 )
 
 _ENGINE: GeometryEngine | None = None
+FAILURE_LOG_PATH = PROJECT_ROOT / "logs" / "geometry_failure_log.jsonl"
 
 
 def _resolve_manifest_column(df: pd.DataFrame) -> str:
@@ -37,6 +40,31 @@ def _resolve_manifest_column(df: pd.DataFrame) -> str:
     if "image_id" in df.columns:
         return "image_id"
     raise KeyError("Manifest must include 'image_filename' or 'image_id'.")
+
+
+def _phase_from_file_spec(file_specification_name: str) -> str | None:
+    path = str(file_specification_name).upper()
+    if "SURVEY" in path:
+        return "survey"
+    if "HAMO" in path:
+        return "hamo"
+    if "LAMO" in path:
+        return "lamo"
+    if "_RC" in path or "/RC" in path:
+        return "rc"
+    return None
+
+
+def _phase_subdir_for_row(row: pd.Series) -> str:
+    phase = str(row.get("phase_subdir", "")).strip().lower()
+    if phase in {"rc", "survey", "hamo", "lamo"}:
+        return phase
+
+    file_spec = str(
+        row.get("file_specification_name", row.get("FILE_SPECIFICATION_NAME", ""))
+    ).strip()
+    phase_from_spec = _phase_from_file_spec(file_spec)
+    return phase_from_spec or "survey"
 
 
 def _init_worker(data_root: str, metakernel_path: str, body_fixed_frame: str = "IAU_VESTA") -> None:
@@ -70,19 +98,42 @@ def _process_one(image_file_path: str) -> dict[str, Any]:
         }
     except Exception as exc:  # pragma: no cover - exercised in HPC runtime
         elapsed = time.time() - t0
+        error_type = "Exception"
+        if isinstance(exc, spiceypy.support_types.SpiceyError):
+            error_type = "SpiceyError"
+        elif "SPICE(" in str(exc):
+            error_type = "SpiceyErrorText"
+
         return {
             "status": "error",
             "image_id": image_id,
+            "image_path": str(image_path),
             "rows": 0,
             "seconds": elapsed,
+            "error_type": error_type,
             "error": str(exc),
         }
+
+
+def _append_failure_record(result: dict[str, Any], log_path: Path) -> None:
+    """Append one structured failure record to the dedicated failure log."""
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "timestamp_utc": datetime.now(UTC).isoformat(),
+        "image_id": result.get("image_id", ""),
+        "image_path": result.get("image_path", ""),
+        "error_type": result.get("error_type", "Exception"),
+        "error": result.get("error", "unknown"),
+    }
+    with log_path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(payload, ensure_ascii=True) + "\n")
 
 
 def build_worklist(data_root: Path, manifest_path: Path) -> tuple[list[str], list[str]]:
     """Return (to_process_paths, skipped_ids) based on parquet idempotency."""
     df = pd.read_csv(manifest_path)
     col = _resolve_manifest_column(df)
+    valid_phases = {"survey", "hamo", "lamo", "rc"}
 
     image_dir = data_root / "01_calibrated_images"
     output_dir = data_root / "04_geometry_tables"
@@ -90,21 +141,36 @@ def build_worklist(data_root: Path, manifest_path: Path) -> tuple[list[str], lis
 
     to_process: list[str] = []
     skipped: list[str] = []
+    seen_paths: set[str] = set()
 
-    for raw in df[col].astype(str):
+    for _, row in df.iterrows():
+        raw = str(row.get(col, ""))
         stem = Path(raw).stem.upper()
-        image_path = image_dir / f"{stem}.IMG"
-        output_path = output_dir / f"{stem}_geometry.parquet"
+        phase_subdir = _phase_subdir_for_row(row)
 
-        if output_path.exists():
+        if phase_subdir not in valid_phases:
+            continue
+
+        image_path = image_dir / phase_subdir / f"{stem}.IMG"
+
+        output_phase_dir = output_dir / phase_subdir
+        output_phase_dir.mkdir(parents=True, exist_ok=True)
+        output_path = output_phase_dir / f"{stem}_geometry.parquet"
+
+        if os.path.exists(output_path):
             skipped.append(stem)
             continue
 
         if not image_path.exists():
-            logging.warning("Skipping missing image file: %s", image_path)
+            logging.warning("Skipping missing image file for %s (phase=%s)", stem, phase_subdir)
             continue
 
-        to_process.append(str(image_path))
+        image_path_str = str(image_path)
+        if image_path_str in seen_paths:
+            continue
+
+        seen_paths.add(image_path_str)
+        to_process.append(image_path_str)
 
     return to_process, skipped
 
@@ -216,6 +282,7 @@ def main() -> int:
                         result["seconds"],
                         result.get("error", "unknown"),
                     )
+                    _append_failure_record(result, FAILURE_LOG_PATH)
 
                 elapsed = time.time() - t_start
                 rate = idx / elapsed if elapsed > 0 else 0.0

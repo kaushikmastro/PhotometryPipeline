@@ -1,6 +1,8 @@
 import logging
 import re
 import time
+from datetime import datetime
+from io import StringIO
 from pathlib import Path
 from urllib.parse import urljoin, urlparse, urlsplit, urlunsplit
 
@@ -45,13 +47,22 @@ class DataManager:
         self.dtm_geometry_pck_name = "dawn_vesta_SPG20160901.tpc"
         self.pds_base_url = pds_base_url
         self.naif_base_url = "https://naif.jpl.nasa.gov/pub/naif/DAWN/kernels/"
-        self.fc_base_url = "https://sbnarchive.psi.edu/pds3/dawn/fc/DWNVFC2_1B/DATA/IMG/"
+        self.fc_archive_base_url = "https://sbnarchive.psi.edu/pds3/dawn/fc/DWNVFC2_1B/"
+        self.fc_index_tab_url = f"{self.fc_archive_base_url}INDEX/INDEX.TAB"
+        self.fc_base_url = f"{self.fc_archive_base_url}DATA/IMG/"
+        self.fc_volume_base_url = self.fc_archive_base_url
         self.dtm_base_url = "https://sbnarchive.psi.edu/pds3/dawn/fc/DWNVSPG_2/DATA/"
         self.dtm_required_subpath = "/pds3/dawn/fc/DWNVSPG_2/DATA/"
         self.naif_pds_bundle_base = (
             "https://naif.jpl.nasa.gov/pub/naif/pds/data/dawn-m_a-spice-6-v1.0/dawnsp_1000/"
         )
         self._dir_cache: dict[str, tuple[list[str], list[str]]] = {}
+        self._min_request_interval_seconds = 2.0
+        self._last_request_epoch = 0.0
+        self._default_retry_after_seconds = 2.0
+        self._request_headers = {
+            "User-Agent": "Mozilla/5.0 (compatible; CopilotDataManager/1.0)"
+        }
 
         try:
             self.manifest = pd.read_csv(self.manifest_path)
@@ -59,6 +70,68 @@ class DataManager:
         except FileNotFoundError:
             logging.error(f"Manifest file not found at {self.manifest_path}")
             self.manifest = pd.DataFrame()  # Empty dataframe
+
+    def _respect_request_pacing(self) -> None:
+        """Apply a small client-side delay between outbound HTTP requests."""
+        now = time.time()
+        wait_for = self._min_request_interval_seconds - (now - self._last_request_epoch)
+        if wait_for > 0:
+            time.sleep(wait_for)
+        self._last_request_epoch = time.time()
+
+    def _retry_after_seconds(self, response: requests.Response | None, attempt: int) -> float:
+        """Compute retry wait from Retry-After header or exponential backoff."""
+        if response is not None:
+            retry_after = response.headers.get("Retry-After")
+            if retry_after:
+                raw = retry_after.strip()
+                if raw.isdigit():
+                    return max(float(raw), 1.0)
+                try:
+                    retry_time = datetime.strptime(raw, "%a, %d %b %Y %H:%M:%S GMT")
+                    # HTTP-date format is always GMT.
+                    delta = retry_time.timestamp() - time.time()
+                    if delta > 0:
+                        return max(delta, 1.0)
+                except ValueError:
+                    pass
+
+        # Exponential backoff for throttling when Retry-After is absent/invalid.
+        return float(min(self._default_retry_after_seconds * (2**attempt), 300))
+
+    def _download_text_with_retries(self, url: str, max_retries: int = 4) -> str:
+        """Download text content with pacing and 429-aware retries."""
+        for attempt in range(max_retries):
+            try:
+                self._respect_request_pacing()
+                response = requests.get(url, timeout=60, headers=self._request_headers)
+                response.raise_for_status()
+                return response.text
+            except requests.exceptions.HTTPError as exc:
+                status_code = exc.response.status_code if exc.response is not None else None
+                logging.warning("Failed to fetch %s on attempt %d: %s", url, attempt + 1, exc)
+                if status_code == 404:
+                    raise
+                if status_code == 429 and attempt < max_retries - 1:
+                    wait_seconds = self._retry_after_seconds(exc.response, attempt)
+                    logging.warning(
+                        "Received 429 for %s. Waiting %.1f seconds before retry.",
+                        url,
+                        wait_seconds,
+                    )
+                    time.sleep(wait_seconds)
+                    continue
+                if attempt < max_retries - 1:
+                    time.sleep(self._retry_after_seconds(exc.response, attempt))
+                else:
+                    raise
+            except requests.exceptions.RequestException as exc:
+                logging.warning("Failed to fetch %s on attempt %d: %s", url, attempt + 1, exc)
+                if attempt < max_retries - 1:
+                    time.sleep(self._retry_after_seconds(None, attempt))
+                else:
+                    raise
+        raise RuntimeError(f"Unable to fetch text from {url}")
 
     def _normalize_image_stem(self, image_id: str) -> str:
         """Normalize manifest values to a stem usable for URL/file construction."""
@@ -73,6 +146,207 @@ class DataManager:
         if "image_id" in self.manifest.columns:
             return "image_id"
         raise KeyError("Manifest must contain 'image_filename' or 'image_id' column.")
+
+    @staticmethod
+    def _fc2_index_table_colspecs() -> tuple[list[tuple[int, int]], list[str]]:
+        """Column byte ranges for DWNVFC2_1B/INDEX/INDEX.TAB."""
+        return (
+            [
+                (1, 35),
+                (38, 129),
+                (132, 142),
+                (145, 155),
+                (157, 180),
+                (181, 202),
+                (203, 224),
+                (226, 250),
+                (253, 266),
+            ],
+            [
+                "DATA_SET_ID",
+                "FILE_SPECIFICATION_NAME",
+                "PRODUCT_ID",
+                "VOLUME_ID",
+                "PRODUCT_CREATION_TIME",
+                "START_TIME",
+                "STOP_TIME",
+                "EXPOSURE_DURATION",
+                "INSTRUMENT_ID",
+            ],
+        )
+
+    def _parse_fc2_index_tab(self, index_text: str) -> pd.DataFrame:
+        """Parse the fixed-width Dawn FC2 INDEX.TAB into a DataFrame."""
+        colspecs, names = self._fc2_index_table_colspecs()
+        table = pd.read_fwf(
+            StringIO(index_text),
+            colspecs=colspecs,
+            names=names,
+            skiprows=1,
+            dtype=str,
+        )
+        table = table.dropna(how="all").reset_index(drop=True)
+        for column in names:
+            if column in table.columns:
+                table[column] = table[column].fillna("").astype(str).str.strip()
+        return table
+
+    def _build_fc_archive_url(self, relative_path: str) -> str:
+        """Build the authoritative archive URL from an INDEX.TAB file specification."""
+        return f"{self.fc_archive_base_url}{relative_path.lstrip('/')}"
+
+    def _image_urls_from_file_spec(self, file_specification_name: str) -> tuple[str, str]:
+        """Return the exact IMG and LBL URLs for a file specification path."""
+        rel = file_specification_name.strip().lstrip("/")
+        img_rel = rel
+        lbl_rel = rel
+        upper_rel = rel.upper()
+
+        if upper_rel.endswith(".IMG"):
+            lbl_rel = rel[:-4] + ".LBL"
+        elif upper_rel.endswith(".LBL"):
+            img_rel = rel[:-4] + ".IMG"
+        else:
+            img_rel = rel + ".IMG"
+            lbl_rel = rel + ".LBL"
+
+        return self._build_fc_archive_url(img_rel), self._build_fc_archive_url(lbl_rel)
+
+    @staticmethod
+    def _is_survey_file_spec(file_specification_name: str) -> bool:
+        """Return True for files that belong to the Dawn FC2 DATA/SURVEY subtree."""
+        path = str(file_specification_name).upper()
+        return path.startswith("/DATA/") and "SURVEY" in path
+
+    @staticmethod
+    def _phase_from_file_spec(file_specification_name: str) -> str | None:
+        """Map archive file path to phase subdirectory name."""
+        path = str(file_specification_name).upper()
+        if "SURVEY" in path:
+            return "survey"
+        if "HAMO" in path:
+            return "hamo"
+        if "LAMO" in path:
+            return "lamo"
+        if re.search(r"(^|[/_])RC[0-9A-Z]*($|[/_])", path):
+            return "rc"
+        return None
+
+    @staticmethod
+    def _is_target_phase_file_spec(file_specification_name: str) -> bool:
+        """Return True when file path belongs to one of the requested mission phases."""
+        return DataManager._phase_from_file_spec(file_specification_name) is not None
+
+    @staticmethod
+    def _is_excluded_phase_file_spec(file_specification_name: str) -> bool:
+        """Return True when file path belongs to non-survey phases to be excluded."""
+        path = str(file_specification_name).upper()
+        return any(phase in path for phase in ("APPROACH", "HAMO", "LAMO"))
+
+    @staticmethod
+    def _is_fc2_f1_stem(stem: str) -> bool:
+        """Return True when an image stem matches Dawn FC2 clear-filter (F1) naming."""
+        token = stem.upper()
+        if not token.startswith("FC21"):
+            return False
+        if "VIR" in token:
+            return False
+        return bool(re.search(r"F1[A-Z0-9]?$", Path(token).stem))
+
+    def enforce_fc2_f1_manifest_filter(self, write_back: bool = True) -> int:
+        """
+        Enforce strict FC2/F1 filtering on the loaded manifest.
+
+        Preference order:
+        1) If explicit instrument/filter columns exist, require instrument=FC2 and filter in {F1, CLEAR}.
+        2) Always enforce filename-stem rule FC21* and exclude VIR.
+        """
+        if self.manifest.empty:
+            logging.warning("Manifest is empty; FC2/F1 filter produced 0 rows.")
+            return 0
+
+        df = self.manifest.copy()
+        image_col = self._manifest_image_column()
+        stems = df[image_col].astype(str).map(self._normalize_image_stem)
+
+        mask = stems.map(self._is_fc2_f1_stem)
+
+        instrument_cols = [c for c in df.columns if "instrument" in c.lower()]
+        filter_cols = [c for c in df.columns if "filter" in c.lower()]
+
+        if instrument_cols:
+            inst_match = pd.Series(False, index=df.index)
+            for col in instrument_cols:
+                inst_vals = df[col].astype(str).str.upper()
+                inst_match |= inst_vals.str.contains("FC2", na=False)
+            mask &= inst_match
+
+        if filter_cols:
+            filt_match = pd.Series(False, index=df.index)
+            for col in filter_cols:
+                filt_vals = df[col].astype(str).str.upper()
+                filt_match |= filt_vals.str.fullmatch(r"(?:F?1|CLEAR)", na=False)
+            mask &= filt_match
+
+        filtered = df.loc[mask].copy().reset_index(drop=True)
+        before = len(df)
+        after = len(filtered)
+        self.manifest = filtered
+
+        if write_back:
+            self.manifest_path.parent.mkdir(parents=True, exist_ok=True)
+            self.manifest.to_csv(self.manifest_path, index=False)
+
+        logging.info("FC2/F1 manifest filter retained %d/%d rows", after, before)
+        return after
+
+    def sync_fc2_f1_manifest_from_archive(self, max_depth: int = 6, max_dirs: int = 5000) -> int:
+        """
+        Build the full FC2/F1 manifest from the fixed-width INDEX.TAB listing.
+
+        Returns:
+            int: Number of manifest rows written.
+        """
+        index_text = self._download_text_with_retries(self.fc_index_tab_url, max_retries=5)
+        table = self._parse_fc2_index_tab(index_text)
+
+        if table.empty:
+            raise RuntimeError("INDEX.TAB parsed successfully but contained no data rows.")
+
+        image_spec_col = "FILE_SPECIFICATION_NAME"
+        instrument_col = "INSTRUMENT_ID"
+        file_specs = table[image_spec_col].fillna("").astype(str).str.strip()
+        instruments = table[instrument_col].fillna("").astype(str).str.upper().str.strip()
+        stems = file_specs.map(lambda value: Path(value).name.upper())
+
+        mask = file_specs.str.upper().str.endswith(".IMG")
+        mask |= file_specs.str.upper().str.endswith(".LBL")
+        mask &= file_specs.map(self._is_target_phase_file_spec)
+        mask &= instruments.eq("FC2")
+        mask &= stems.map(self._is_fc2_f1_stem)
+
+        filtered = table.loc[mask].copy().reset_index(drop=True)
+        if filtered.empty:
+            raise RuntimeError("INDEX.TAB parsed successfully but no FC2/F1 image rows matched.")
+
+        filtered["image_filename"] = filtered[image_spec_col].map(lambda value: Path(value).name)
+        filtered["download_url"] = filtered[image_spec_col].map(self._build_fc_archive_url)
+        filtered["file_type"] = filtered[image_spec_col].map(
+            lambda value: Path(value).suffix.upper().lstrip(".")
+        )
+        filtered["phase_subdir"] = filtered[image_spec_col].map(self._phase_from_file_spec)
+        filtered["filter_id"] = "F1"
+        filtered = filtered[filtered["phase_subdir"].notna()].copy().reset_index(drop=True)
+        filtered = filtered.sort_values(["phase_subdir", "image_filename"]).reset_index(drop=True)
+        self.manifest = filtered
+        self.manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        self.manifest.to_csv(self.manifest_path, index=False)
+        logging.info(
+            "INDEX.TAB sync complete: wrote %d FC2/F1 rows to %s",
+            len(self.manifest),
+            self.manifest_path,
+        )
+        return len(self.manifest)
 
     def _construct_image_url(self, image_id: str) -> tuple[list[str], list[str]]:
         """
@@ -393,11 +667,43 @@ class DataManager:
 
         col = self._manifest_image_column()
         missing_files = []
-        for raw_value in self.manifest[col].astype(str):
+        for _, row in self.manifest.iterrows():
+            raw_value = str(row.get(col, ""))
             stem = self._normalize_image_stem(raw_value)
-            if not (self.image_dir / f"{stem}.IMG").exists():
+            phase_subdir = str(row.get("phase_subdir", "")).strip().lower()
+            if phase_subdir not in {"rc", "survey", "hamo", "lamo"}:
+                phase_subdir = self._phase_from_file_spec(str(row.get("file_specification_name", ""))) or "survey"
+            if not (self.image_dir / phase_subdir / f"{stem}.IMG").exists():
                 missing_files.append(stem)
         return missing_files
+
+    def _destination_subdir_for_row(self, row: pd.Series) -> str:
+        """Resolve image destination subfolder for one manifest row."""
+        phase_subdir = str(row.get("phase_subdir", "")).strip().lower()
+        if phase_subdir in {"rc", "survey", "hamo", "lamo"}:
+            return phase_subdir
+        phase_from_spec = self._phase_from_file_spec(str(row.get("file_specification_name", "")))
+        return phase_from_spec or "survey"
+
+    def _get_missing_manifest_files(self) -> pd.DataFrame:
+        """Return manifest rows whose destination files are not yet present."""
+        if self.manifest.empty:
+            return self.manifest.copy()
+
+        rows = self.manifest.copy()
+        if "download_url" not in rows.columns:
+            if "file_specification_name" not in rows.columns:
+                raise KeyError("Manifest must include download_url or file_specification_name.")
+            rows["download_url"] = rows["file_specification_name"].map(self._build_fc_archive_url)
+
+        destination_paths = rows.apply(
+            lambda row: self.image_dir
+            / self._destination_subdir_for_row(row)
+            / str(row.get("image_filename", Path(str(row.get("file_specification_name", ""))).name)),
+            axis=1,
+        )
+        missing_mask = ~destination_paths.map(lambda path: Path(path).exists())
+        return rows.loc[missing_mask].reset_index(drop=True)
 
     def download_missing_data(self):
         """
@@ -415,42 +721,34 @@ class DataManager:
             logging.error("Data root does not exist: %s", self.data_root)
             return
 
-        missing_images = self._get_missing_images()
-        if not missing_images:
-            logging.info("No missing image files to download. Data is up to date.")
+        missing_rows = self._get_missing_manifest_files()
+        if missing_rows.empty:
+            logging.info("No missing manifest files to download. Data is up to date.")
             return
 
-        logging.info(f"Found {len(missing_images)} missing image files. Starting download...")
+        logging.info("Found %d missing manifest files. Starting download...", len(missing_rows))
         self.image_dir.mkdir(parents=True, exist_ok=True)
+        for phase_subdir in ("rc", "survey", "hamo", "lamo"):
+            (self.image_dir / phase_subdir).mkdir(parents=True, exist_ok=True)
 
-        for image_id in missing_images:
-            img_dest = self.image_dir / f"{image_id}.IMG"
-            lbl_dest = self.image_dir / f"{image_id}.LBL"
+        for _, row in missing_rows.iterrows():
+            file_spec = str(row.get("file_specification_name", "")).strip()
+            download_url = str(row.get("download_url", "")).strip()
+            if not download_url and file_spec:
+                download_url = self._build_fc_archive_url(file_spec)
 
-            discovered_img_urls, discovered_lbl_urls = self._discover_image_urls(image_id)
-            if discovered_img_urls and not discovered_lbl_urls:
-                discovered_lbl_urls = self._derive_lbl_urls_from_img_urls(discovered_img_urls)
-            logging.info(
-                "Discovery for %s found %d IMG candidates and %d LBL candidates",
-                image_id,
-                len(discovered_img_urls),
-                len(discovered_lbl_urls),
-            )
+            destination_name = str(row.get("image_filename", Path(file_spec).name)).strip()
+            destination_subdir = self._destination_subdir_for_row(row)
+            destination = self.image_dir / destination_subdir / destination_name
+            if not download_url:
+                logging.warning("Skipping row without download URL: %s", destination_name)
+                continue
 
-            static_img_urls, static_lbl_urls = self._construct_image_url(image_id)
-            img_urls = list(dict.fromkeys(discovered_img_urls + static_img_urls))
-            lbl_urls = list(dict.fromkeys(discovered_lbl_urls + static_lbl_urls))
+            if destination.exists():
+                continue
 
-            img_ok = self._download_from_candidate_urls(img_urls, img_dest)
-            lbl_ok = self._download_from_candidate_urls(lbl_urls, lbl_dest)
-
-            if not img_ok:
-                logging.error("Failed to download IMG for image_id=%s", image_id)
-            if not lbl_ok:
-                logging.warning(
-                    "LBL not found for image_id=%s. Continuing with IMG-only ingestion.",
-                    image_id,
-                )
+            if not self._download_file_with_retries(download_url, destination):
+                logging.error("Failed to download %s from %s", destination_name, download_url)
 
     def _download_from_candidate_urls(
         self, urls: list[str], destination: Path, max_retries: int = 3
@@ -604,11 +902,12 @@ class DataManager:
         existing_spk = list(self.spice_dir.glob("*.bsp"))
         existing_ck = list(self.spice_dir.glob("*.bc"))
         dynamic_mk = self.spice_dir / "dawn_dynamic.tm"
-        has_2011_sc_ck = any(
-            re.search(r"(?i)^dawn_sc_11\d{4}_\d{6}.*\.bc$", p.name) for p in existing_ck
+        has_sc_or_sa_ck = any(
+            re.search(r"(?i)^dawn_(?:sc|sa)_(?:11|12)\d{4}_\d{6}.*\.bc$", p.name)
+            for p in existing_ck
         )
         has_fc2_ck = any(re.search(r"(?i)^dawn_fc2_.*\.bc$", p.name) for p in existing_ck)
-        if existing_spk and existing_ck and dynamic_mk.exists() and (has_2011_sc_ck or has_fc2_ck):
+        if existing_spk and existing_ck and dynamic_mk.exists() and (has_sc_or_sa_ck or has_fc2_ck):
             logging.info(
                 "SPICE kernels already present with CK coverage markers; refreshing SCLK/CK and metakernel."
             )
@@ -656,7 +955,7 @@ class DataManager:
         logging.info("Attempting to download reconstructed CK kernels for attitude coverage...")
         self._download_reconstructed_ck_kernels()
 
-        # Step 7: Ensure latest SCLK (.tsc) is available for late-2011 attitude unlock.
+        # Step 7: Ensure latest SCLK (.tsc) is available for late-2011/2012 attitude unlock.
         logging.info("Ensuring latest DAWN SCLK kernel is available...")
         self._ensure_latest_sclk_kernel()
 
@@ -751,7 +1050,7 @@ class DataManager:
         return downloaded_count
 
     def _discover_reconstructed_ck_urls(self) -> list[str]:
-        """Discover CK kernels needed for 2011 Vesta FC2 pointing coverage."""
+        """Discover CK kernels needed for 2011/2012 Vesta FC2 pointing coverage."""
         ck_base = f"{self.naif_base_url}ck/"
         candidates: list[str] = []
 
@@ -762,34 +1061,36 @@ class DataManager:
                 set(re.findall(r'href=["\']([^"\']+\.bc)["\']', resp.text, flags=re.IGNORECASE))
             )
 
-            # Mission-week attitude kernels around Vesta encounter (2011) for spacecraft and solar arrays.
-            weekly_2011 = [
-                n for n in names if re.search(r"(?i)^dawn_(?:sc|sa)_11\d{4}_\d{6}.*\.bc$", n)
+            weekly_2011_2012 = [
+                n for n in names if re.search(r"(?i)^dawn_(?:sc|sa)_(?:11|12)\d{4}_\d{6}.*\.bc$", n)
             ]
-            # FC2 CK is mission-interval instrument pointing and should be included when available.
             fc2 = [n for n in names if re.search(r"(?i)^dawn_fc2_.*\.bc$", n)]
-            # Include quick-look 2011 segments as fallback/augment.
-            ql_2011 = [n for n in names if re.search(r"(?i)^dawn_ql_11\d{4}_\d{6}\.bc$", n)]
+            ql_2011_2012 = [n for n in names if re.search(r"(?i)^dawn_ql_(?:11|12)\d{4}_\d{6}\.bc$", n)]
 
-            for n in weekly_2011 + fc2 + ql_2011:
+            for n in weekly_2011_2012 + fc2 + ql_2011_2012:
                 candidates.append(f"{ck_base}{Path(n).name}")
 
             logging.info(
-                "Discovered %d CK kernel candidates for 2011/FC2 coverage", len(candidates)
+                "Discovered %d CK kernel candidates for 2011/2012/FC2 coverage", len(candidates)
             )
         except requests.exceptions.RequestException as exc:
             logging.warning("Could not scan NAIF ck directory: %s", exc)
 
-        # Conservative static fallback list (core weekly and FC2 coverage file).
         static_fallback = [
             f"{ck_base}dawn_sc_110801_110807.bc",
             f"{ck_base}dawn_sc_110808_110814.bc",
             f"{ck_base}dawn_sc_110815_110821.bc",
             f"{ck_base}dawn_sc_110822_110828.bc",
+            f"{ck_base}dawn_sc_120604_120610.bc",
+            f"{ck_base}dawn_sc_120611_120617.bc",
+            f"{ck_base}dawn_sc_120813_120819.bc",
             f"{ck_base}dawn_sa_110801_110807.bc",
             f"{ck_base}dawn_sa_110808_110814.bc",
             f"{ck_base}dawn_sa_110815_110821.bc",
             f"{ck_base}dawn_sa_110822_110828.bc",
+            f"{ck_base}dawn_sa_120604_120610.bc",
+            f"{ck_base}dawn_sa_120611_120617.bc",
+            f"{ck_base}dawn_sa_120813_120819.bc",
             f"{ck_base}dawn_fc2_110723_120725_grv221108_v1.bc",
         ]
         candidates.extend(static_fallback)
@@ -961,7 +1262,8 @@ class DataManager:
                 logging.info(
                     f"Downloading {url} to {destination} (Attempt {attempt + 1}/{max_retries})"
                 )
-                with requests.get(url, stream=True, timeout=30) as r:
+                self._respect_request_pacing()
+                with requests.get(url, stream=True, timeout=30, headers=self._request_headers) as r:
                     r.raise_for_status()
                     with open(destination, "wb") as f:
                         for chunk in r.iter_content(chunk_size=8192):
@@ -974,14 +1276,26 @@ class DataManager:
                 if status_code == 404:
                     logging.error(f"Stopping retries for {url}: received 404 Not Found.")
                     return False
+                if status_code == 429:
+                    wait_seconds = self._retry_after_seconds(e.response, attempt)
+                    if attempt < max_retries - 1:
+                        logging.warning(
+                            "Received 429 for %s. Waiting %.1f seconds before retry.",
+                            url,
+                            wait_seconds,
+                        )
+                        time.sleep(wait_seconds)
+                        continue
+                    logging.error(f"All {max_retries} attempts to download {url} failed.")
+                    return False
                 if attempt < max_retries - 1:
-                    time.sleep(5)
+                    time.sleep(2)
                 else:
                     logging.error(f"All {max_retries} attempts to download {url} failed.")
             except requests.exceptions.RequestException as e:
                 logging.warning(f"Failed to download {url} on attempt {attempt + 1}: {e}")
                 if attempt < max_retries - 1:
-                    time.sleep(5)  # Wait for 5 seconds before retrying
+                    time.sleep(2)
                 else:
                     logging.error(f"All {max_retries} attempts to download {url} failed.")
         return False
