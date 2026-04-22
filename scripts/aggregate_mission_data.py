@@ -7,7 +7,7 @@ from pathlib import Path
 
 import duckdb
 
-PHASES = ["survey", "rc", "hamo", "lamo"]
+PHASES = ["lamo"]#["survey", "rc", "hamo", "lamo"]
 
 
 def main() -> int:
@@ -59,7 +59,6 @@ def main() -> int:
         )
         con.execute(query)
         con = duckdb.connect(database=":memory:")  # Reconnect to ensure we read the latest file system state
-        con.execute("SET show_progress=true;")  # Enable progress bar for the next query
 
         if output_path.exists():
             rows_written = con.execute(

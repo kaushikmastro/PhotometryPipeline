@@ -127,3 +127,47 @@ Execution-time observability:
 - Per-phase timer instrumentation (`start_time = time.time()`) was added to the mission aggregator.
 - The script now logs elapsed seconds for each phase extraction (for example: "Processed HAMO in 642.5 seconds").
 - This timing telemetry is part of the Phase 3 performance envelope and is used to monitor DuckDB throughput and detect regressions in extraction runtime.
+
+Live run status:
+- Geometry Engine job `vesta_ra` is currently running on node `c148`.
+- RC geometry processing (423 images) and Survey geometry processing (1,153 images) are in progress.
+- The job has exceeded 6 hours of wall-clock time, which is consistent with heavy geometric computation such as high-resolution shape-model intersections.
+- Once the SLURM job completes, the mission aggregator will run to finalize the four-phase baseline dataset.
+
+Timeout incident and resume strategy:
+- Incident: Survey phase processing timed out under SLURM in Job `25514161`.
+- Resolution: a resume strategy is implemented via file-existence checks before geometry execution.
+- Engineering requirement: prevent redundant computation of 16,000+ existing HAMO/LAMO geometry outputs by verifying target parquet paths before initiating ray-tracing.
+- Current pending workload: 850 Survey images and 423 RC images.
+
+Subset execution architecture decision:
+- Decision: shifted from a monolithic geometry submission model to surgical subset scripts for final mission phases.
+- Rationale: avoid repeated I/O overhead from scanning 16,000+ already-produced outputs on Curta network storage.
+- Standardization: the manifest-driven execution pattern is now the blueprint for the General Planetary Pipeline to support reliable multi-stage mission processing.
+
+Finish-script verification and integrity status:
+- Verification: the finish script operates with file-level manifest logic, not folder-level gating.
+- Integrity: 303 existing Survey parquet outputs are preserved.
+- Redundant computation is avoided by cross-referencing `01_calibrated_images` inputs against `04_geometry_tables` outputs at the individual image stem level before ray-tracing is queued.
+
+SPICE ray-tracer masking decision:
+- Event: replaced strict image-level finiteness validation with pixel-level boolean masking in the geometry ray-tracing path.
+- Rationale: distant mission phases (Survey and RC) can contain >90% deep-space pixels, which naturally produce non-finite SPICE intercept vectors; strict whole-image finiteness checks caused false fatal failures.
+- The masking strategy now preserves valid asteroid-surface pixels and drops empty-space pixels on a per-pixel basis.
+- Impact: pipeline robustness is maintained across all orbital distances, independent of target fractional coverage in the camera field of view.
+
+## Phase 4: SciML Architecture Refactor
+
+Event:
+- Deployed the 4-layer SciML architecture alongside the legacy `hapke_mcmc_package` data pipeline.
+
+Design pattern:
+- Physics, inference, and data are now explicitly separated into `photometry.models`, `photometry.fitting`, and the existing ETL layer.
+- This removes single-responsibility violations from the model layer and keeps MCMC concerns out of photometric physics classes.
+
+Core contracts established:
+- Dual-backend evaluation is now a first-class contract: NumPy for bulk CPU computation and PyTorch for gradient-based optimization.
+- Minimum vectorization throughput is now specified as `1_000_000` rows for the model contract and benchmarked with pytest.
+
+Next step:
+- Implement the baseline `LambertianModel` first so the new testing and backend-dispatch framework can be validated end-to-end before adding the remaining photometric models.
