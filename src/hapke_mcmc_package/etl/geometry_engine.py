@@ -476,38 +476,41 @@ class GeometryEngine:
             incidence[idx] = float(incdnc_rad)
             emission[idx] = float(emissn_rad)
 
-        if not np.isfinite(spoints).any():
-            raise RuntimeError(
-                f"FATAL GEOMETRY MISSING: non-finite intercept vector produced for {image_id}"
-            )
-
         phase = np.rad2deg(phase)
         incidence = np.rad2deg(incidence)
         emission = np.rad2deg(emission)
-
-        if (
-            not np.isfinite(phase).any()
-            or not np.isfinite(incidence).any()
-            or not np.isfinite(emission).any()
-        ):
-            raise RuntimeError(
-                f"FATAL GEOMETRY MISSING: non-finite illumination angles computed for {image_id}"
-            )
-
         iof_flat = iof_data.reshape(-1)
-        if not np.isfinite(iof_flat).all():
-            raise RuntimeError(f"FATAL GEOMETRY MISSING: non-finite I/F values in {image_id}")
-
-        if not np.all(np.isfinite(spoints)):
-            raise RuntimeError(f"FATAL GEOMETRY MISSING: invalid intercept rows in {image_id}")
-
         yy, xx = np.indices(image_shape)
         pixel_x = xx.reshape(-1)
         pixel_y = yy.reshape(-1)
 
+        # Boolean Masking to handle deep-space pixels in Survey/RC
+        spoints_finite = np.all(np.isfinite(spoints), axis=1)
+        phase_valid = np.isfinite(phase) & (phase >= 0.0) & (phase <= 180.0)
+        incidence_valid = np.isfinite(incidence) & (incidence >= 0.0) & (incidence <= 180.0)
+        emission_valid = np.isfinite(emission) & (emission >= 0.0) & (emission <= 180.0)
+        iof_valid = np.isfinite(iof_flat)
+
+        valid_mask = (spoints_finite & phase_valid & incidence_valid & emission_valid & iof_valid)
+
+        n_valid = int(np.count_nonzero(valid_mask))
+        if n_valid == 0:
+            raise RuntimeError(f"FATAL GEOMETRY MISSING: no valid geometry pixels found for {image_id}")
+
+        # Filter arrays using the mask
+        spoints = spoints[valid_mask]
+        phase = phase[valid_mask]
+        incidence = incidence[valid_mask]
+        emission = emission[valid_mask]
+        iof_flat = iof_flat[valid_mask]
+        pixel_x = pixel_x[valid_mask]
+        pixel_y = pixel_y[valid_mask]
+        latitude = latitude[valid_mask]
+        longitude = longitude[valid_mask]
+
         df = pd.DataFrame(
             {
-                "image_id": np.full(n_pix, image_id, dtype=object),
+                "image_id": np.full(n_valid, image_id, dtype=object),
                 "pixel_x": pixel_x.astype(np.int32),
                 "pixel_y": pixel_y.astype(np.int32),
                 "iof": iof_flat.astype(np.float32),

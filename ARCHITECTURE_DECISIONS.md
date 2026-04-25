@@ -156,6 +156,11 @@ SPICE ray-tracer masking decision:
 - The masking strategy now preserves valid asteroid-surface pixels and drops empty-space pixels on a per-pixel basis.
 - Impact: pipeline robustness is maintained across all orbital distances, independent of target fractional coverage in the camera field of view.
 
+LAMO photometric interpretation:
+- A spatial and photometric review of the LAMO sample confirmed that FC21B0016309_12003033748F1G is equatorial rather than Rheasilvia-adjacent, so the lower mean I/F seen in LAMO is not a dark-terrain sampling artifact.
+- The observed LAMO dimming is now recorded as a genuine photometric response to the high-incidence viewing geometry, consistent with Lommel-Seeliger behavior.
+- A stratified LAMO check showed the target image sits near the brighter middle of the LAMO distribution rather than in an anomalously dark tail.
+
 ## Phase 4: SciML Architecture Refactor
 
 Event:
