@@ -195,3 +195,130 @@ class AkimovModel(BasePhotometricModel):
     def from_dict(cls, payload: Mapping[str, Any]) -> "AkimovModel":
         raise NotImplementedError
 
+
+@ModelRegistry.register
+@dataclass
+class LunarLambertModel(BasePhotometricModel):
+    """
+    Lunar-Lambert disk function implementation following Schröder et al. (2013), Equation 6.
+
+    Reference: Schröder et al. 2013, Eq. 6 — Lunar-Lambert blending of Lommel-Seeliger and Lambertian terms.
+
+    The blending parameter `c_L` may be used as a scalar model parameter. By default the model
+    uses the published Vesta phase-dependent values via the linear relation
+    c_L(phi) = 0.830 - 0.00722 * phi_deg when `phase_dependent_c_L` metadata flag is True.
+    Set `phase_dependent_c_L` to False to treat `c_L` as a scalar free parameter.
+    """
+
+    model_name: str = "lunar_lambert"
+
+    def __post_init__(self) -> None:
+        # primary amplitude (unitless scaling similar to Lambertian albedo)
+        self.parameters.setdefault("albedo", 1.0)
+        # scalar c_L default (will be overridden per-phase if phase_dependent_c_L is True)
+        self.parameters.setdefault("c_L", 0.830)
+        # by default use phase-dependent published c_L(phi)
+        self.metadata.setdefault("phase_dependent_c_L", True)
+
+    def parameter_names(self) -> list[str]:
+        return ["albedo", "c_L"]
+
+    def parameter_bounds(self) -> dict[str, tuple[float, float]]:
+        return {"albedo": (0.0, 10.0), "c_L": (0.0, 1.0)}
+
+    def parameter_priors(self) -> dict[str, ParameterPrior]:
+        return {
+            "albedo": ParameterPrior(prior_type="uniform", lower_bound=0.0, upper_bound=10.0),
+            "c_L": ParameterPrior(prior_type="uniform", lower_bound=0.0, upper_bound=1.0),
+        }
+
+    def _albedo(self) -> float:
+        return float(self.parameters.get("albedo", 1.0))
+
+    def _c_L_scalar(self) -> float:
+        return float(self.parameters.get("c_L", 0.830))
+
+    def _compute_c_L_array(self, phase: Any) -> Any:
+        """
+        Compute c_L per-sample. If metadata['phase_dependent_c_L'] is True, compute
+        c_L = 0.830 - 0.00722 * phi_deg where phi is the phase angle in degrees.
+        Otherwise return a scalar filled array with the scalar c_L parameter.
+        """
+        use_phase_dep = bool(self.metadata.get("phase_dependent_c_L", True))
+        if use_phase_dep:
+            # phase input expected in radians in GeometryBatch; convert to degrees
+            # handle both numpy arrays and torch tensors via backend resolution
+            try:
+                import torch as _torch  # type: ignore
+            except Exception:
+                _torch = None
+
+            if _torch is not None and isinstance(phase, _torch.Tensor):
+                phi_deg = phase * (180.0 / np.pi)
+                return 0.830 - 0.00722 * phi_deg
+            else:
+                phi = np.asarray(phase, dtype=float)
+                phi_deg = phi * (180.0 / np.pi)
+                return 0.830 - 0.00722 * phi_deg
+
+        # scalar fallback
+        scalar = self._c_L_scalar()
+        try:
+            import torch as _torch  # type: ignore
+        except Exception:
+            _torch = None
+        if _torch is not None and isinstance(phase, _torch.Tensor):
+            return _torch.full_like(phase, fill_value=float(scalar), dtype=_torch.float64)
+        return np.full_like(np.asarray(phase, dtype=float), fill_value=float(scalar))
+
+    def _reflectance_numpy(self, geometry: GeometryBatch) -> np.ndarray:
+        incidence = np.asarray(geometry.incidence, dtype=np.float64)
+        emission = np.asarray(geometry.emission, dtype=np.float64)
+        phase = np.asarray(geometry.phase, dtype=np.float64)
+
+        mu0 = np.clip(np.cos(incidence), 0.0, None)
+        mu = np.clip(np.cos(emission), 0.0, None)
+
+        # Lunar-Lambert disk function: D = c_L * (mu0/(mu0+mu)) + (1 - c_L) * mu0
+        c_L_arr = self._compute_c_L_array(phase)
+        denom = mu0 + mu + 1e-10
+        ls_term = mu0 / denom
+        D = c_L_arr * ls_term + (1.0 - c_L_arr) * mu0
+
+        # Simple multiplicative albedo scaling
+        R = self._albedo() * D
+        return np.where(denom > 1e-12, R, 0.0)
+
+    def _reflectance_torch(self, geometry: GeometryBatch) -> Any:
+        if torch is None:
+            raise RuntimeError("PyTorch is not available in this environment.")
+        incidence = geometry.incidence if isinstance(geometry.incidence, torch.Tensor) else torch.as_tensor(geometry.incidence)
+        emission = geometry.emission if isinstance(geometry.emission, torch.Tensor) else torch.as_tensor(geometry.emission)
+        phase = geometry.phase if isinstance(geometry.phase, torch.Tensor) else torch.as_tensor(geometry.phase)
+
+        incidence = incidence.to(dtype=torch.float64)
+        emission = emission.to(dtype=torch.float64)
+        phase = phase.to(dtype=torch.float64)
+
+        mu0 = torch.clamp(torch.cos(incidence), min=0.0)
+        mu = torch.clamp(torch.cos(emission), min=0.0)
+        denom = mu0 + mu
+
+        c_L_arr = self._compute_c_L_array(phase)
+        ls_term = mu0 / (denom + 1e-10)
+        D = c_L_arr * ls_term + (1.0 - c_L_arr) * mu0
+
+        R = self._albedo() * D
+        return torch.where(denom > 1e-12, R, torch.zeros_like(R))
+
+    def predict_with_uncertainty(self, geometry: GeometryBatch, parameter_samples: Any, sample_axis: int = 0, return_summary: bool = True):
+        raise NotImplementedError("LunarLambertModel uncertainty propagation is not implemented yet.")
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> "LunarLambertModel":
+        backend_value = payload.get("backend", Backend.AUTO.value)
+        backend = Backend(backend_value)
+        parameters = dict(payload.get("parameters", {}))
+        metadata = dict(payload.get("metadata", {}))
+        return cls(parameters=parameters, metadata=metadata, backend=backend)
+

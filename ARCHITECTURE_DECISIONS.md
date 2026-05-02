@@ -211,3 +211,15 @@ FitResult & Metadata
 - The Diagnostic Resolution: Applying a manual Lommel-Seeliger disk correction normalized the viewing geometry and reduced the RC/Survey discrepancy from 70% to 2%.
 - Decision - Disk Function: The 2% agreement mathematically proves that Lambertian geometric handling introduces fatal biases for dark, airless bodies. All future modeling must use physical disk functions (Lommel-Seeliger minimum).
 - Decision - Hapke Opposition Constraint: Because the RC dataset captures the true, steep opposition surge down to 5° phase, RC is designated as the primary, undisputed constraint for future Hapke opposition parameter fitting ($B_0$, $h$).
+
+### Phase: Statistical Rigor & Low-Code Accessibility
+
+- Decision - Fitter Encapsulation: All statistical math (covariance matrices, standard errors, reduced chi-square) is strictly encapsulated within the `LeastSquaresFitter`. Jupyter notebooks are forbidden from calculating their own parameter uncertainties.
+- Reasoning: To support low-code reproducibility, the `FitResult` object must act as a complete, publication-ready scientific summary. Users should only need to read the attributes, not calculate them.
+- Implementation: The `metadata` dictionary of the `FitResult` now natively includes `parameter_errors` (derived from the SciPy Jacobian), `parameter_covariance`, `reduced_chi_square`, and `boundary_hits` flags to immediately warn users of unphysical fits.
+
+## Correction: Lunar-Lambert Disk Function & Weighting (Schröder et al. 2013)
+
+- Decision - Lunar-Lambert Model: Implement a `LunarLambertModel` (Schröder et al. 2013, Eq. 6) in `photometry.models` to provide a physically-motivated disk function that blends Lommel–Seeliger and Lambertian terms. The implementation exposes the blending parameter `c_L` as a model parameter while defaulting to the published Vesta phase-dependent relation $c_L(\phi)=0.830-0.00722\,\phi_{\deg}$ via a `phase_dependent_c_L` metadata flag.
+- Decision - Weighting Contract: The `LeastSquaresFitter` will accept optional per-bin weights. When the gold-layer CSV provides `n_pixels` and `iof_iqr` columns, weights are computed as `sqrt(n_pixels) / iof_iqr` for each bin and applied to the residuals (optimizer-internal scaling). The `FitResult.metadata` records `weighted` and `weight_source` so downstream users can inspect whether weighting was used.
+- Reasoning: Schröder et al. (2013) provide an empirically-validated disk-function for Vesta that reduces geometric biases when comparing across phases. Using per-bin uncertainty proxies (`iof_iqr`) and per-bin counts (`n_pixels`) gives a pragmatic, heteroskedastic weighting that stabilizes fits and makes residuals physically interpretable.
