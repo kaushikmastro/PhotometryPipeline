@@ -223,3 +223,20 @@ FitResult & Metadata
 - Decision - Lunar-Lambert Model: Implement a `LunarLambertModel` (Schröder et al. 2013, Eq. 6) in `photometry.models` to provide a physically-motivated disk function that blends Lommel–Seeliger and Lambertian terms. The implementation exposes the blending parameter `c_L` as a model parameter while defaulting to the published Vesta phase-dependent relation $c_L(\phi)=0.830-0.00722\,\phi_{\deg}$ via a `phase_dependent_c_L` metadata flag.
 - Decision - Weighting Contract: The `LeastSquaresFitter` will accept optional per-bin weights. When the gold-layer CSV provides `n_pixels` and `iof_iqr` columns, weights are computed as `sqrt(n_pixels) / iof_iqr` for each bin and applied to the residuals (optimizer-internal scaling). The `FitResult.metadata` records `weighted` and `weight_source` so downstream users can inspect whether weighting was used.
 - Reasoning: Schröder et al. (2013) provide an empirically-validated disk-function for Vesta that reduces geometric biases when comparing across phases. Using per-bin uncertainty proxies (`iof_iqr`) and per-bin counts (`n_pixels`) gives a pragmatic, heteroskedastic weighting that stabilizes fits and makes residuals physically interpretable.
+
+## Decision: Two-Mode Lunar-Lambert `c_L` Exposition (2026-05-02)
+
+- Problem: The fitter dynamically queries `parameter_names()` and `parameter_bounds()` from models. `c_L` was always exposed even when the model used the published phase-dependent relation, creating a "silent disconnect" where the optimizer could explore a disconnected parameter dimension that had no effect on the model (leading to ill-conditioned optimization and wasted search).
+
+- Resolution: `LunarLambertModel` now exposes `c_L` only when `metadata['phase_dependent_c_L']` is False. When `phase_dependent_c_L` is True (default), `parameter_names()`, `parameter_bounds()`, and `parameter_priors()` return only `albedo`. The model computes `c_L(phi)` internally using the Schröder relation $c_L(\phi)=0.830-0.00722\,\phi_{\deg}$, preventing the optimizer from exploring a dead parameter axis.
+
+- Rationale: This change prevents the optimizer from wasting iterations on a parameter that is functionally locked by physics/metadata, while preserving the ability to treat `c_L` as a free scalar parameter for later comparative studies by setting `phase_dependent_c_L` to False.
+
+- Impact: Fixes ill-conditioned fits caused by invisible/disconnected parameters; keeps the fitter's dynamic contract intact; and documents the architecture decision for reproducibility and review.
+
+## Decision: Minnaert Baseline Added with Free `k` (2026-05-02)
+
+- Addition: Implemented `MinnaertModel` in `photometry.models` as an empirical two-parameter baseline with free parameters `albedo` and `k`.
+- Parameter contract: `albedo` default is 1.0 with bounds [0.0, 10.0]; `k` default is 0.5 with bounds [0.0, 2.0]. These are exposed directly through the model contract for the fitter to consume dynamically.
+- Physics implementation: Reflectance is evaluated as $R = \text{albedo} \cdot \mu_0^k \cdot \mu^{k-1}$ using clamped cosine terms and a numerical safety epsilon on $\mu$ to avoid divide-by-zero instability at the terminator when $k-1<0$.
+- Study rationale: Keeping `k` as a free parameter enables explicit validation of Li et al. (2013) style linear `k`-phase behavior in comparative studies without changing fitter internals.

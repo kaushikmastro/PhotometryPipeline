@@ -142,32 +142,70 @@ class LommelSeeligerModel(BasePhotometricModel):
         parameters = dict(payload.get("parameters", {}))
         metadata = dict(payload.get("metadata", {}))
         return cls(parameters=parameters, metadata=metadata, backend=backend)
-
-
+@ModelRegistry.register
 @dataclass
 class MinnaertModel(BasePhotometricModel):
-    """Empirical baseline model skeleton."""
+    """Empirical Minnaert disk-function model."""
 
     model_name: str = "minnaert"
 
-    def _reflectance_numpy(self, geometry: GeometryBatch) -> np.ndarray:
-        raise NotImplementedError
-
-    def _reflectance_torch(self, geometry: GeometryBatch) -> Any:
-        raise NotImplementedError
+    def __post_init__(self) -> None:
+        self.parameters.setdefault("albedo", 1.0)
+        self.parameters.setdefault("k", 0.5)
 
     def parameter_names(self) -> list[str]:
-        raise NotImplementedError
+        return ["albedo", "k"]
 
     def parameter_bounds(self) -> dict[str, tuple[float, float]]:
-        raise NotImplementedError
+        return {"albedo": (0.0, 10.0), "k": (0.0, 2.0)}
 
     def parameter_priors(self) -> dict[str, ParameterPrior]:
-        raise NotImplementedError
+        return {
+            "albedo": ParameterPrior(prior_type="uniform", lower_bound=0.0, upper_bound=10.0),
+            "k": ParameterPrior(prior_type="uniform", lower_bound=0.0, upper_bound=2.0),
+        }
+
+    def _albedo(self) -> float:
+        return float(self.parameters.get("albedo", 1.0))
+
+    def _k(self) -> float:
+        return float(self.parameters.get("k", 0.5))
+
+    def _reflectance_numpy(self, geometry: GeometryBatch) -> np.ndarray:
+        incidence = np.asarray(geometry.incidence, dtype=np.float64)
+        emission = np.asarray(geometry.emission, dtype=np.float64)
+
+        mu0 = np.clip(np.cos(incidence), 0.0, None)
+        mu = np.clip(np.cos(emission), 0.0, None)
+
+        k = self._k()
+        mu_safe = mu + 1e-10
+        return self._albedo() * (mu0**k) * (mu_safe ** (k - 1.0))
+
+    def _reflectance_torch(self, geometry: GeometryBatch) -> Any:
+        if torch is None:
+            raise RuntimeError("PyTorch is not available in this environment.")
+
+        incidence = geometry.incidence if isinstance(geometry.incidence, torch.Tensor) else torch.as_tensor(geometry.incidence)
+        emission = geometry.emission if isinstance(geometry.emission, torch.Tensor) else torch.as_tensor(geometry.emission)
+
+        incidence = incidence.to(dtype=torch.float64)
+        emission = emission.to(dtype=torch.float64)
+
+        mu0 = torch.clamp(torch.cos(incidence), min=0.0)
+        mu = torch.clamp(torch.cos(emission), min=0.0)
+
+        k = self._k()
+        mu_safe = mu + 1e-10
+        return self._albedo() * torch.pow(mu0, k) * torch.pow(mu_safe, (k - 1.0))
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> "MinnaertModel":
-        raise NotImplementedError
+        backend_value = payload.get("backend", Backend.AUTO.value)
+        backend = Backend(backend_value)
+        parameters = dict(payload.get("parameters", {}))
+        metadata = dict(payload.get("metadata", {}))
+        return cls(parameters=parameters, metadata=metadata, backend=backend)
 
 
 @dataclass
@@ -221,16 +259,26 @@ class LunarLambertModel(BasePhotometricModel):
         self.metadata.setdefault("phase_dependent_c_L", True)
 
     def parameter_names(self) -> list[str]:
+        use_phase_dep = bool(self.metadata.get("phase_dependent_c_L", True))
+        if use_phase_dep:
+            return ["albedo"]
         return ["albedo", "c_L"]
 
     def parameter_bounds(self) -> dict[str, tuple[float, float]]:
-        return {"albedo": (0.0, 10.0), "c_L": (0.0, 1.0)}
+        use_phase_dep = bool(self.metadata.get("phase_dependent_c_L", True))
+        bounds = {"albedo": (0.0, 10.0)}
+        if not use_phase_dep:
+            bounds["c_L"] = (0.0, 1.0)
+        return bounds
 
     def parameter_priors(self) -> dict[str, ParameterPrior]:
-        return {
+        use_phase_dep = bool(self.metadata.get("phase_dependent_c_L", True))
+        priors: dict[str, ParameterPrior] = {
             "albedo": ParameterPrior(prior_type="uniform", lower_bound=0.0, upper_bound=10.0),
-            "c_L": ParameterPrior(prior_type="uniform", lower_bound=0.0, upper_bound=1.0),
         }
+        if not use_phase_dep:
+            priors["c_L"] = ParameterPrior(prior_type="uniform", lower_bound=0.0, upper_bound=1.0)
+        return priors
 
     def _albedo(self) -> float:
         return float(self.parameters.get("albedo", 1.0))
@@ -282,7 +330,7 @@ class LunarLambertModel(BasePhotometricModel):
         # Lunar-Lambert disk function: D = c_L * (mu0/(mu0+mu)) + (1 - c_L) * mu0
         c_L_arr = self._compute_c_L_array(phase)
         denom = mu0 + mu + 1e-10
-        ls_term = mu0 / denom
+        ls_term = (2.0*mu0) / denom
         D = c_L_arr * ls_term + (1.0 - c_L_arr) * mu0
 
         # Simple multiplicative albedo scaling
@@ -305,7 +353,7 @@ class LunarLambertModel(BasePhotometricModel):
         denom = mu0 + mu
 
         c_L_arr = self._compute_c_L_array(phase)
-        ls_term = mu0 / (denom + 1e-10)
+        ls_term = (2.0*mu0) / (denom + 1e-10)
         D = c_L_arr * ls_term + (1.0 - c_L_arr) * mu0
 
         R = self._albedo() * D
