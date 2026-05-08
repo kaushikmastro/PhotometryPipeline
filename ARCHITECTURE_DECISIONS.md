@@ -240,3 +240,46 @@ FitResult & Metadata
 - Parameter contract: `albedo` default is 1.0 with bounds [0.0, 10.0]; `k` default is 0.5 with bounds [0.0, 2.0]. These are exposed directly through the model contract for the fitter to consume dynamically.
 - Physics implementation: Reflectance is evaluated as $R = \text{albedo} \cdot \mu_0^k \cdot \mu^{k-1}$ using clamped cosine terms and a numerical safety epsilon on $\mu$ to avoid divide-by-zero instability at the terminator when $k-1<0$.
 - Study rationale: Keeping `k` as a free parameter enables explicit validation of Li et al. (2013) style linear `k`-phase behavior in comparative studies without changing fitter internals.
+
+### Lunar-Lambert Baseline Validation Complete (2026-05-04)
+
+**Scientific Validation:**
+*   **Absolute Calibration:** Fitted albedos are physically consistent across four mission phases. The HAMO value ($0.0839$) falls cleanly within the published Vesta normal albedo range (Schröder et al. 2013).
+*   **Phase Gradient:** The RC-to-LAMO albedo ratio ($1.998$) exceeds the linear phase coefficient prediction by $13\%$. This modest excess is consistent with non-linear phase brightening at moderate-low phase angles ($<20^\circ$).
+*   **Chi-Squared Rescaling:** Reduced $\chi^2$ stabilized between 7 and 11. To prevent artificially narrow MCMC posteriors, $\chi^2$ rescaling (by a factor of $\approx 3.1$) will be applied in later Bayesian inference.
+
+**Dataset Limitations (Carried Forward):**
+1.  **Geometric Inaccessibility of Opposition:** True opposition surge data ($<10^\circ$ phase) in the RC phase occurs at extreme incidence angles ($>80^\circ$). Excluding these extreme geometries means the primary opposition constraints for Hapke modeling will come from the Survey phase ($8^\circ$ to $14^\circ$).
+2.  **Filter Inconsistency:** To maximize phase coverage, RC was filtered at $i \le 80^\circ$, while mapping phases (HAMO/LAMO) were filtered at $i \le 70^\circ$. This geometric trade-off will be documented in the methodology.
+3.  **Edge-Phase Fit Degradation:** A strong negative correlation between absolute residuals and statistical weight (e.g., $r = -0.85$ to $-0.89$) confirms the baseline model fits edge-phase bins poorly due to the missing phase function. Consequently, future constraints on Hapke $B_0$, $h$, and $\bar{\theta}$ will be inherently weaker than constraints on $w$ and $g$.
+
+## Data Products: Disk-Resolved vs Disk-Integrated
+
+- **Disk-Resolved (per-pixel) products:** High-volume geometry tables (parquet) under `data/04_geometry_tables/*/` contain per-pixel I/F (`iof`) and geometric angles (`incidence`, `emission`, `phase`) suitable for disk-resolved disk-function fitting (e.g., Minnaert). These files record pixel-level viewing geometry and are the source for `data/05_silver_layer/*_resolved_sample.parquet` derived samples.
+
+- **Disk-Integrated (per-bin / phase-curve) products:** Aggregated CSVs under `data/05_aggregated/` summarize binned I/F vs phase (one row per phase-angle bin) used for Hapke parameter inference and baseline phase-curve comparisons. These products are intentionally coarser and serve a different statistical contract than disk-resolved samples.
+
+## ADR-003: Multi-Phase Dataset Integration and Pivot to Hapke Physical Modeling
+
+Status: Accepted (2026-05-08)
+
+### Context
+
+- **Track 1 limitation (Minnaert):** The initial Minnaert fit used only RC (Rotational Characterization) phase data. This introduced a ~50 degree phase-angle gap (12 deg to 62 deg), making global extrapolation of $k_0$ and $\beta$ mathematically unstable and physically unrealistic.
+- **Geometric noise source:** Using an ellipsoid shape model instead of a high-resolution DTM produced ~14% RMS residuals in the Minnaert baseline, because unresolved local topography (shadows/craters/slopes) leaked into residual structure.
+- **Data scale constraint:** The raw mission corpus is very large (~730M pixels), so extraction must be high-throughput and memory-efficient.
+
+### Decisions
+
+- **Dataset combination:** Merge RC and Survey mission phases into one disk-resolved Silver Layer to close the phase-angle gap before global model fitting.
+- **Sampling strategy:** Use DuckDB native Bernoulli sampling (`USING SAMPLE 1% (bernoulli)`) to obtain a statistically representative and computationally efficient extraction subset.
+- **Model pivot (Track 2):** Transition from empirical Minnaert parameterization to Hapke IMSA physical modeling, replacing the power-law representation with physical parameters ($w, g, \bar{\theta}, B_0, h$).
+- **Topography handling contract:** Explicitly use Hapke macroscopic roughness ($\bar{\theta}$) to absorb unresolved geometric residuals introduced by missing DTM-scale terrain fidelity.
+
+### Consequences
+
+- **Improved phase lever arm:** Combined RC + Survey coverage now spans a near-continuous 8 deg to 80 deg phase range, enabling physically legitimate phase-function fitting.
+- **Statistical power for binning:** The ~7.3M-row sample supports dense $5^\circ \times 5^\circ \times 5^\circ$ 3D binning with materially better stability than RC-only subsets.
+- **Optimization complexity increase:** The inference stack moves from linear regression toward constrained non-linear `least_squares` optimization with `soft_l1` robust loss.
+
+- **Rationale:** Keeping these products distinct preserves correct statistical assumptions: disk-integrated fits constrain global phase behavior while disk-resolved samples enable explicit disk-function parameter estimation (limb-darkening `k`, local albedo variation). Transformations and weights applied to each product type are recorded in the pipeline and in this architecture diary.
