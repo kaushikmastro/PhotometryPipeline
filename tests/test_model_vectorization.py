@@ -13,7 +13,7 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from photometry.core.types import GeometryBatch  # noqa: E402
-from photometry.models import lambertian as _lambertian  # noqa: F401,E402
+from photometry.models import baselines as _baselines  # noqa: F401,E402
 from photometry.models.base import ModelRegistry  # noqa: E402
 
 

@@ -1,307 +1,185 @@
-#!/usr/bin/env python3
-"""Batch geometry table generation for Dawn FC images."""
-
-from __future__ import annotations
-
 import argparse
-import atexit
-import json
 import logging
-import multiprocessing as mp
-import os
-import sys
-import time
-from datetime import UTC, datetime
+import multiprocessing
 from pathlib import Path
-from typing import Any
+import sys
+import pyarrow.parquet as pq
 
-import pandas as pd
-import spiceypy
+# Absolute package path resolution following formal repository architecture standards
+from hapke_mcmc_package.etl.geometry_engine import GeometryEngine
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-SRC_DIR = PROJECT_ROOT / "src"
-if str(SRC_DIR) not in sys.path:
-    sys.path.insert(0, str(SRC_DIR))
+# Thread-isolated storage reference for processing node workers
+_engine_worker = None
 
-from hapke_mcmc_package.etl.geometry_engine import GeometryEngine  # noqa: E402
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-)
+# CANONICAL SCHEMA TARGET REQUIREMENTS
+REQUIRED_COLUMNS = {
+    "image_id", "pixel_x", "pixel_y", "iof", 
+    "incidence", "emission", "phase", "latitude", "longitude"
+}
 
-_ENGINE: GeometryEngine | None = None
-FAILURE_LOG_PATH = PROJECT_ROOT / "logs" / "geometry_failure_log.jsonl"
-
-
-def _resolve_manifest_column(df: pd.DataFrame) -> str:
-    if "image_filename" in df.columns:
-        return "image_filename"
-    if "image_id" in df.columns:
-        return "image_id"
-    raise KeyError("Manifest must include 'image_filename' or 'image_id'.")
+# EXPLICIT TOPOGRAPHY MODE MAPPING
+SURFACE_METHOD_MAPPING = {
+    "ELLIPSOID": "ELLIPSOID",
+    "DSK256": "DSK/UNPRIORITIZED"
+}
 
 
-def _phase_from_file_spec(file_specification_name: str) -> str | None:
-    path = str(file_specification_name).upper()
-    if "SURVEY" in path:
-        return "survey"
-    if "HAMO" in path:
-        return "hamo"
-    if "LAMO" in path:
-        return "lamo"
-    if "_RC" in path or "/RC" in path:
-        return "rc"
-    return None
-
-
-def _phase_subdir_for_row(row: pd.Series) -> str:
-    phase = str(row.get("phase_subdir", "")).strip().lower()
-    if phase in {"rc", "survey", "hamo", "lamo"}:
-        return phase
-
-    file_spec = str(
-        row.get("file_specification_name", row.get("FILE_SPECIFICATION_NAME", ""))
-    ).strip()
-    phase_from_spec = _phase_from_file_spec(file_spec)
-    return phase_from_spec or "survey"
-
-
-def _init_worker(data_root: str, metakernel_path: str, body_fixed_frame: str = "IAU_VESTA") -> None:
-    """Initializer for each worker process; loads SPICE and DTM once per worker."""
-    global _ENGINE
-    _ENGINE = GeometryEngine(
+def _init_worker(data_root: str, metakernel_path: str, mode: str, output_subdir: str):
+    """Instantiates a core-isolated instance of GeometryEngine per process slot."""
+    global _engine_worker
+    
+    spice_method = SURFACE_METHOD_MAPPING.get(mode, "ELLIPSOID")
+    
+    _engine_worker = GeometryEngine(
         data_root=data_root,
         metakernel_path=metakernel_path,
-        body_fixed_frame=body_fixed_frame,
+        surface_intercept_method=spice_method,
+        output_subdir=output_subdir
     )
-    atexit.register(spiceypy.kclear)
 
 
-def _process_one(image_file_path: str) -> dict[str, Any]:
-    """Process one image; executed inside worker process."""
-    global _ENGINE
-    if _ENGINE is None:
-        raise RuntimeError("Worker GeometryEngine is not initialized.")
+def discover_worklist(input_images: list[Path], target_output_root: Path) -> list[str]:
+    """Given candidate images and the output root, return the subset that still
+    needs geometry computed: skip images with an existing, schema-valid,
+    readable parquet; re-queue anything missing, corrupted, truncated, or
+    schema-mismatched.
+    """
+    worklist: list[str] = []
 
-    image_path = Path(image_file_path)
-    image_id = image_path.stem
-    t0 = time.time()
+    # DEEP METADATA AND SEMANTIC INTEGRITY AUDITING LAYER
+    for img in input_images:
+        phase_subdir = GeometryEngine._phase_subdir_from_image_path(img)
+
+        img_parts_lower = [part.lower() for part in img.parts]
+        if not any(phase in img_parts_lower for phase in ("rc", "survey", "hamo", "lamo")):
+            logging.warning("File path context lacks structural phase designations. Default routing to 'survey': %s", img)
+
+        expected_parquet = target_output_root / phase_subdir / f"{img.stem}_geometry.parquet"
+
+        if expected_parquet.exists():
+            try:
+                meta = pq.read_metadata(expected_parquet)
+                existing_columns = set(meta.schema.names)
+
+                if REQUIRED_COLUMNS.issubset(existing_columns):
+                    # Native PyArrow slice read forces page evaluation without loading full tables into RAM
+                    pq.read_table(expected_parquet, columns=["image_id"]).slice(0, 1)
+                    continue
+                else:
+                    logging.warning("Schema mismatch verified on storage layer for file: %s. Queueing for recovery overwrite.", expected_parquet)
+            except Exception as exc:
+                logging.warning(
+                    "Truncated, partial, or corrupted file trace intercepted at destination path: %s. "
+                    "Error context: %s. Queueing for generation overwrite.", expected_parquet, exc
+                )
+
+        worklist.append(str(img))
+
+    return worklist
+
+
+def _process_image_worker(image_path: str) -> tuple[bool, str, str | None]:
+    """
+    Executes geometry tracking across worker threads. 
+    Returns a structured status payload back to the main coordination loop.
+    """
+    global _engine_worker
     try:
-        df = _ENGINE.compute_geometry(str(image_path))
-        elapsed = time.time() - t0
-        return {
-            "status": "ok",
-            "image_id": image_id,
-            "rows": int(len(df)),
-            "seconds": elapsed,
-        }
-    except Exception as exc:  # pragma: no cover - exercised in HPC runtime
-        elapsed = time.time() - t0
-        error_type = "Exception"
-        if isinstance(exc, spiceypy.support_types.SpiceyError):
-            error_type = "SpiceyError"
-        elif "SPICE(" in str(exc):
-            error_type = "SpiceyErrorText"
-
-        return {
-            "status": "error",
-            "image_id": image_id,
-            "image_path": str(image_path),
-            "rows": 0,
-            "seconds": elapsed,
-            "error_type": error_type,
-            "error": str(exc),
-        }
+        _engine_worker.compute_geometry(image_path)
+        return True, image_path, None
+    except Exception as exc:
+        logging.error("Catastrophic error encountered during core tracking execution on target: %s", 
+                      image_path, exc_info=True)
+        return False, image_path, str(exc)
 
 
-def _append_failure_record(result: dict[str, Any], log_path: Path) -> None:
-    """Append one structured failure record to the dedicated failure log."""
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "timestamp_utc": datetime.now(UTC).isoformat(),
-        "image_id": result.get("image_id", ""),
-        "image_path": result.get("image_path", ""),
-        "error_type": result.get("error_type", "Exception"),
-        "error": result.get("error", "unknown"),
-    }
-    with log_path.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(payload, ensure_ascii=True) + "\n")
-
-
-def build_worklist(data_root: Path, manifest_path: Path) -> tuple[list[str], list[str]]:
-    """Return (to_process_paths, skipped_ids) based on parquet idempotency."""
-    df = pd.read_csv(manifest_path)
-    col = _resolve_manifest_column(df)
-    valid_phases = {"survey", "hamo", "lamo", "rc"}
-
-    image_dir = data_root / "01_calibrated_images"
-    output_dir = data_root / "04_geometry_tables"
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    to_process: list[str] = []
-    skipped: list[str] = []
-    seen_paths: set[str] = set()
-
-    for _, row in df.iterrows():
-        raw = str(row.get(col, ""))
-        stem = Path(raw).stem.upper()
-        phase_subdir = _phase_subdir_for_row(row)
-
-        if phase_subdir not in valid_phases:
-            continue
-
-        image_path = image_dir / phase_subdir / f"{stem}.IMG"
-
-        output_phase_dir = output_dir / phase_subdir
-        output_phase_dir.mkdir(parents=True, exist_ok=True)
-        output_path = output_phase_dir / f"{stem}_geometry.parquet"
-
-        if os.path.exists(output_path):
-            skipped.append(stem)
-            continue
-
-        if not image_path.exists():
-            logging.warning("Skipping missing image file for %s (phase=%s)", stem, phase_subdir)
-            continue
-
-        image_path_str = str(image_path)
-        if image_path_str in seen_paths:
-            continue
-
-        seen_paths.add(image_path_str)
-        to_process.append(image_path_str)
-
-    return to_process, skipped
-
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run geometry generation for all manifest images.")
+def main():
+    parser = argparse.ArgumentParser(description="Dawn FC Geometry ETL Pipeline Execution Wrapper")
+    
+    # Dual CLI Flag Support: Gracefully handles both hyphens and underscores for cross-tooling safety
     parser.add_argument(
-        "--data-root",
+        "--data-root", "--data_root", 
+        dest="data_root", 
+        type=str, 
+        required=True, 
+        help="Path to absolute data storage root"
+    )
+    parser.add_argument("--metakernel", type=str, required=True, help="Path to targeted fallback SPICE metakernel")
+    parser.add_argument("--workers", type=int, default=4, help="Total execution process thread count pools")
+    parser.add_argument(
+        "--mode",
         type=str,
-        default=str(PROJECT_ROOT / "data"),
-        help="Root data directory containing 01/02/03/04 subdirectories.",
+        choices=list(SURFACE_METHOD_MAPPING.keys()),
+        required=True,
+        help="Topography calculation style option"
     )
     parser.add_argument(
-        "--manifest",
-        type=str,
-        default=str(PROJECT_ROOT / "configs" / "survey_manifest.csv"),
-        help="Path to survey manifest CSV.",
-    )
-    parser.add_argument(
-        "--metakernel",
+        "--output-subdir", "--output_subdir",
+        dest="output_subdir",
         type=str,
         required=True,
-        help="Explicit metakernel path (.tm) to furnish for the entire run.",
+        help="Output directory name under data-root for geometry tables "
+             "(e.g. 04_geometry_tables_dsk256_110825 to match the committed mission-science "
+             "baseline). No default: the destination must always be explicit."
     )
     parser.add_argument(
-        "--body-fixed-frame",
+        "--image-list", "--image_list",
+        dest="image_list",
         type=str,
-        default="IAU_VESTA",
-        help="Body-fixed reference frame for geometry calculations (default: IAU_VESTA). "
-        "For high-resolution DSK models with localized frames, provide the DSK-native frame name.",
+        default=None,
+        help="Optional path to a text file of explicit .IMG file paths (one per line) to "
+             "restrict this run to. Still subject to the same skip-check as a full scan. "
+             "If omitted, all *.IMG files under data-root are scanned (existing behavior)."
     )
-    parser.add_argument(
-        "--workers",
-        type=int,
-        default=max(1, (os.cpu_count() or 2) - 1),
-        help="Number of worker processes.",
-    )
-    return parser.parse_args()
+    args = parser.parse_args()
 
+    target_output_root = Path(args.data_root) / args.output_subdir
+    target_output_root.mkdir(parents=True, exist_ok=True)
 
-def main() -> int:
-    args = parse_args()
-    data_root = Path(args.data_root)
-    manifest_path = Path(args.manifest)
+    logging.info("Initializing multi-core processing array under configuration mode: %s", args.mode)
+    logging.info("Destination directory mapped for structural output generation: %s", target_output_root)
 
-    if not manifest_path.exists():
-        logging.error("Manifest not found: %s", manifest_path)
-        return 2
+    if args.image_list:
+        with open(args.image_list) as f:
+            input_images = sorted(Path(line.strip()) for line in f if line.strip())
+        logging.info("Restricting run to explicit image list: %s (%d paths)", args.image_list, len(input_images))
+    else:
+        # Scans the calibrated data repository path exclusively to avoid tracing raw instrument inputs
+        input_images = sorted(list(Path(args.data_root).glob("01_calibrated_images/**/*.IMG")))
 
-    try:
-        resolved = data_root.resolve(strict=True)
-    except FileNotFoundError:
-        logging.error("Data root does not exist: %s", data_root)
-        return 3
+    worklist = discover_worklist(input_images, target_output_root)
 
-    if not str(resolved).startswith("/scratch/"):
-        logging.error("Refusing run: data root resolves to %s, expected /scratch/...", resolved)
-        return 4
+    logging.info("Discovery audit complete. Total calibrated images located: %d. Active items passed to processing queue: %d",
+                 len(input_images), len(worklist))
 
-    to_process, skipped = build_worklist(data_root, manifest_path)
-    logging.info(
-        "Geometry batch summary: %d queued, %d already done", len(to_process), len(skipped)
-    )
+    if not worklist:
+        logging.info("All outputs verified complete and schema-conforming on target layout. Pipeline finished.")
+        return
 
-    if not to_process:
-        logging.info("No missing geometry tables. Nothing to do.")
-        return 0
+    # Initialize pool execution context
+    with multiprocessing.Pool(
+        processes=args.workers, 
+        initializer=_init_worker, 
+        initargs=(args.data_root, args.metakernel, args.mode, args.output_subdir)
+    ) as pool:
+        results = pool.map(_process_image_worker, worklist)
 
-    total = len(to_process)
-    worker_count = max(1, min(int(args.workers), total))
-    if worker_count != int(args.workers):
-        logging.info(
-            "Adjusting workers from %d to %d based on queued images=%d",
-            int(args.workers),
-            worker_count,
-            total,
-        )
-
-    ok_count = 0
-    err_count = 0
-    t_start = time.time()
-
-    try:
-        with mp.Pool(
-            processes=worker_count,
-            initializer=_init_worker,
-            initargs=(str(data_root), args.metakernel, args.body_fixed_frame),
-        ) as pool:
-            for idx, result in enumerate(
-                pool.imap_unordered(_process_one, to_process, chunksize=1), start=1
-            ):
-                if result["status"] == "ok":
-                    ok_count += 1
-                    logging.info(
-                        "[%d/%d] OK %s rows=%d time=%.1fs",
-                        idx,
-                        total,
-                        result["image_id"],
-                        result["rows"],
-                        result["seconds"],
-                    )
-                else:
-                    err_count += 1
-                    logging.error(
-                        "[%d/%d] FAIL %s time=%.1fs error=%s",
-                        idx,
-                        total,
-                        result["image_id"],
-                        result["seconds"],
-                        result.get("error", "unknown"),
-                    )
-                    _append_failure_record(result, FAILURE_LOG_PATH)
-
-                elapsed = time.time() - t_start
-                rate = idx / elapsed if elapsed > 0 else 0.0
-                remaining = (total - idx) / rate if rate > 0 else float("inf")
-                if remaining != float("inf"):
-                    logging.info(
-                        "Progress %.1f%% (%d/%d), throughput=%.3f img/s, ETA=%.1f min",
-                        100.0 * idx / total,
-                        idx,
-                        total,
-                        rate,
-                        remaining / 60.0,
-                    )
-
-        logging.info("Geometry batch completed: ok=%d fail=%d total=%d", ok_count, err_count, total)
-        return 1 if err_count > 0 else 0
-    finally:
-        spiceypy.kclear()
+    # PROCESS MONITORING STATUS INSPECTION
+    failed_jobs = [item for item in results if not item[0]]
+    successful_count = len(results) - len(failed_jobs)
+    
+    logging.info("ETL Tracking Sequence Finalized. Successful files: %d, Terminal task errors: %d", 
+                 successful_count, len(failed_jobs))
+    
+    if failed_jobs:
+        logging.critical("Pipeline processing run finished with system failures. Aborting cluster tracking state.")
+        for _, path, error_msg in failed_jobs:
+            logging.error("Target item failure summary -> File: %s | Trace context: %s", path, error_msg)
+        
+        sys.exit(1)
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    main()
