@@ -164,50 +164,28 @@ RC emission threshold decision:
 ## Phase 5: Gold Layer Refinery (v1.1.0)
 
 Event:
-- Standardized the mission aggregation layer into a parameterized Gold Layer refinery in `scripts/aggregate_mission_data.py` for Survey, RC, HAMO, and LAMO phase products.
 
 Statistical refinement:
-- Replaced `mean(iof)` with `median(iof)` as the primary photometric statistic to reduce sensitivity to localized bright surface heterogeneity such as craters and albedo outliers.
-- Added interquartile range summaries via `approx_quantile(iof, 0.25)` and `approx_quantile(iof, 0.75)` so each phase bin carries a robust uncertainty envelope for downstream optimization.
-- Added `count(*)` as `n_pixels` to preserve the effective statistical weight of each bin.
 
 Variable phase binning:
-- Implemented 0.5° phase bins for `phase < 15°` to resolve the non-linear opposition surge regime where the phase curve is steepest.
-- Retained 1.0° bins for `phase >= 15°` to keep the long-tail geometry compact while preserving scientific resolution near opposition.
-- The binning logic is now phase-width aware and uses the configured bin width in the `CASE WHEN phase < 15` branch.
 
 Adaptive geometric filtering:
-- The RC phase uses a 75° emission cut to maximize scientifically valuable mid-to-high emission data in the surge-dominated regime.
-- Survey, HAMO, and LAMO retain the 60° emission cut to preserve the established mapping standard and maintain comparability with the broader mission archive.
-- Geometry summary columns were retained across all phases so the fitter receives the actual mean incidence, mean emission, mean phase, and phase dispersion for each aggregate bin.
 
 LAMO photometric interpretation:
-- A spatial and photometric review of the LAMO sample confirmed that FC21B0016309_12003033748F1G is equatorial rather than Rheasilvia-adjacent, so the lower mean I/F seen in LAMO is not a dark-terrain sampling artifact.
-- The observed LAMO dimming is now recorded as a genuine photometric response to the high-incidence viewing geometry, consistent with Lommel-Seeliger behavior.
-- A stratified LAMO check showed the target image sits near the brighter middle of the LAMO distribution rather than in an anomalously dark tail.
 
 ## Phase 4: SciML Architecture Refactor
 
 Event:
-- Deployed the 4-layer SciML architecture alongside the legacy `hapke_mcmc_package` data pipeline.
-
 Design pattern:
 - Physics, inference, and data are now explicitly separated into `photometry.models`, `photometry.fitting`, and the existing ETL layer.
-- This removes single-responsibility violations from the model layer and keeps MCMC concerns out of photometric physics classes.
-
-Core contracts established:
 - Dual-backend evaluation is now a first-class contract: NumPy for bulk CPU computation and PyTorch for gradient-based optimization.
 - Minimum vectorization throughput is now specified as `1_000_000` rows for the model contract and benchmarked with pytest.
-
 Next step:
 - Implement the baseline `LambertianModel` first so the new testing and backend-dispatch framework can be validated end-to-end before adding the remaining photometric models.
 
 ## Optimization Engine & LeastSquaresFitter
-
-Event:
 - Implemented the baseline bounded-optimization engine as `LeastSquaresFitter` using `scipy.optimize.least_squares`.
 - This component completes the Inference layer of the 4-layer SciML architecture.
-
 Optimizer Selection: scipy.optimize.least_squares
 - Rationale: Least-squares is the traditional, well-understood baseline before advancing to gradient-based (PyTorch) or MCMC methods.
 - Advantage: SciPy's native integration with NumPy arrays avoids external dependency chains and integrates seamlessly with the physics model layer.
@@ -216,9 +194,6 @@ Optimizer Selection: scipy.optimize.least_squares
 Algorithm: Trust Region Reflective (TRF)
 - Justification: Planetary photometric parameters have strict physical boundaries (e.g., Albedo $\in [0,1]$, phase width function exponents often in [0,2]).
 - Advantage: TRF natively enforces box constraints during optimization, preventing unphysical drift to negative albedos or out-of-range phase function exponents.
-- This removes post-hoc clipping logic and guarantees all fitted parameters satisfy domain constraints by construction.
-
-Loss Function: soft_l1
 - Justification: Real phase curve data contains low-level heterogeneity (unresolved bright craters, albedo variations, topographic shadows) that can skew a standard L2 fit.
 - Advantage: soft_l1 loss is robust to outliers by applying a smooth transition from quadratic (near zero residuals) to linear (large residuals), so isolated bright spots do not dominate the objective function.
 - This preserves statistical power for global phase-curve trends without requiring a priori outlier detection or manual flagging.
@@ -226,8 +201,85 @@ Loss Function: soft_l1
 Dynamic Model Contract
 - The fitter dynamically extracts `parameter_names()` and `parameter_bounds()` from the passed `BasePhotometricModel` instance at fit time.
 - No hard-coded parameter lists, bounds, or physics are embedded in the fitter; adding new models requires no fitter changes.
-- This keeps the optimization logic entirely model-agnostic and enforces strict architectural separation between Physics (models) and Inference (fitters).
-
 FitResult & Metadata
 - The fitter returns a `FitResult` containing `fitted_parameters`, `objective_value` (final residual sum of squares), and rich metadata (success flag, optimizer status code, optimizer message, function evaluations, gradient norm, active constraints).
 - This allows downstream analysis to inspect convergence quality, detect weak constraints, and diagnose ill-conditioned optimization problems.
+
+### Phase: Lambertian Baseline & Lommel-Seeliger Diagnostic (Completed)
+- Parameter Drift & Model Failure: Fitting the Lambertian model across all mission phases resulted in severe parameter drift (Albedo shifted from ~0.50 in RC to ~0.30 in LAMO). This empirically proves the Lambertian model is unstable across varying viewing geometries and cannot capture Vesta's physical phase curve.
+- The RC vs. Survey Discrepancy: Initial Lambertian residuals showed a concerning 70% discrepancy between RC and Survey data in the <15° opposition regime.
+- The Diagnostic Resolution: Applying a manual Lommel-Seeliger disk correction normalized the viewing geometry and reduced the RC/Survey discrepancy from 70% to 2%.
+- Decision - Disk Function: The 2% agreement mathematically proves that Lambertian geometric handling introduces fatal biases for dark, airless bodies. All future modeling must use physical disk functions (Lommel-Seeliger minimum).
+- Decision - Hapke Opposition Constraint: Because the RC dataset captures the true, steep opposition surge down to 5° phase, RC is designated as the primary, undisputed constraint for future Hapke opposition parameter fitting ($B_0$, $h$).
+
+### Phase: Statistical Rigor & Low-Code Accessibility
+
+- Decision - Fitter Encapsulation: All statistical math (covariance matrices, standard errors, reduced chi-square) is strictly encapsulated within the `LeastSquaresFitter`. Jupyter notebooks are forbidden from calculating their own parameter uncertainties.
+- Reasoning: To support low-code reproducibility, the `FitResult` object must act as a complete, publication-ready scientific summary. Users should only need to read the attributes, not calculate them.
+- Implementation: The `metadata` dictionary of the `FitResult` now natively includes `parameter_errors` (derived from the SciPy Jacobian), `parameter_covariance`, `reduced_chi_square`, and `boundary_hits` flags to immediately warn users of unphysical fits.
+
+## Correction: Lunar-Lambert Disk Function & Weighting (Schröder et al. 2013)
+
+- Decision - Lunar-Lambert Model: Implement a `LunarLambertModel` (Schröder et al. 2013, Eq. 6) in `photometry.models` to provide a physically-motivated disk function that blends Lommel–Seeliger and Lambertian terms. The implementation exposes the blending parameter `c_L` as a model parameter while defaulting to the published Vesta phase-dependent relation $c_L(\phi)=0.830-0.00722\,\phi_{\deg}$ via a `phase_dependent_c_L` metadata flag.
+- Decision - Weighting Contract: The `LeastSquaresFitter` will accept optional per-bin weights. When the gold-layer CSV provides `n_pixels` and `iof_iqr` columns, weights are computed as `sqrt(n_pixels) / iof_iqr` for each bin and applied to the residuals (optimizer-internal scaling). The `FitResult.metadata` records `weighted` and `weight_source` so downstream users can inspect whether weighting was used.
+- Reasoning: Schröder et al. (2013) provide an empirically-validated disk-function for Vesta that reduces geometric biases when comparing across phases. Using per-bin uncertainty proxies (`iof_iqr`) and per-bin counts (`n_pixels`) gives a pragmatic, heteroskedastic weighting that stabilizes fits and makes residuals physically interpretable.
+
+## Decision: Two-Mode Lunar-Lambert `c_L` Exposition (2026-05-02)
+
+- Problem: The fitter dynamically queries `parameter_names()` and `parameter_bounds()` from models. `c_L` was always exposed even when the model used the published phase-dependent relation, creating a "silent disconnect" where the optimizer could explore a disconnected parameter dimension that had no effect on the model (leading to ill-conditioned optimization and wasted search).
+
+- Resolution: `LunarLambertModel` now exposes `c_L` only when `metadata['phase_dependent_c_L']` is False. When `phase_dependent_c_L` is True (default), `parameter_names()`, `parameter_bounds()`, and `parameter_priors()` return only `albedo`. The model computes `c_L(phi)` internally using the Schröder relation $c_L(\phi)=0.830-0.00722\,\phi_{\deg}$, preventing the optimizer from exploring a dead parameter axis.
+
+- Rationale: This change prevents the optimizer from wasting iterations on a parameter that is functionally locked by physics/metadata, while preserving the ability to treat `c_L` as a free scalar parameter for later comparative studies by setting `phase_dependent_c_L` to False.
+
+- Impact: Fixes ill-conditioned fits caused by invisible/disconnected parameters; keeps the fitter's dynamic contract intact; and documents the architecture decision for reproducibility and review.
+
+## Decision: Minnaert Baseline Added with Free `k` (2026-05-02)
+
+- Addition: Implemented `MinnaertModel` in `photometry.models` as an empirical two-parameter baseline with free parameters `albedo` and `k`.
+- Parameter contract: `albedo` default is 1.0 with bounds [0.0, 10.0]; `k` default is 0.5 with bounds [0.0, 2.0]. These are exposed directly through the model contract for the fitter to consume dynamically.
+- Physics implementation: Reflectance is evaluated as $R = \text{albedo} \cdot \mu_0^k \cdot \mu^{k-1}$ using clamped cosine terms and a numerical safety epsilon on $\mu$ to avoid divide-by-zero instability at the terminator when $k-1<0$.
+- Study rationale: Keeping `k` as a free parameter enables explicit validation of Li et al. (2013) style linear `k`-phase behavior in comparative studies without changing fitter internals.
+
+### Lunar-Lambert Baseline Validation Complete (2026-05-04)
+
+**Scientific Validation:**
+*   **Absolute Calibration:** Fitted albedos are physically consistent across four mission phases. The HAMO value ($0.0839$) falls cleanly within the published Vesta normal albedo range (Schröder et al. 2013).
+*   **Phase Gradient:** The RC-to-LAMO albedo ratio ($1.998$) exceeds the linear phase coefficient prediction by $13\%$. This modest excess is consistent with non-linear phase brightening at moderate-low phase angles ($<20^\circ$).
+*   **Chi-Squared Rescaling:** Reduced $\chi^2$ stabilized between 7 and 11. To prevent artificially narrow MCMC posteriors, $\chi^2$ rescaling (by a factor of $\approx 3.1$) will be applied in later Bayesian inference.
+
+**Dataset Limitations (Carried Forward):**
+1.  **Geometric Inaccessibility of Opposition:** True opposition surge data ($<10^\circ$ phase) in the RC phase occurs at extreme incidence angles ($>80^\circ$). Excluding these extreme geometries means the primary opposition constraints for Hapke modeling will come from the Survey phase ($8^\circ$ to $14^\circ$).
+2.  **Filter Inconsistency:** To maximize phase coverage, RC was filtered at $i \le 80^\circ$, while mapping phases (HAMO/LAMO) were filtered at $i \le 70^\circ$. This geometric trade-off will be documented in the methodology.
+3.  **Edge-Phase Fit Degradation:** A strong negative correlation between absolute residuals and statistical weight (e.g., $r = -0.85$ to $-0.89$) confirms the baseline model fits edge-phase bins poorly due to the missing phase function. Consequently, future constraints on Hapke $B_0$, $h$, and $\bar{\theta}$ will be inherently weaker than constraints on $w$ and $g$.
+
+## Data Products: Disk-Resolved vs Disk-Integrated
+
+- **Disk-Resolved (per-pixel) products:** High-volume geometry tables (parquet) under `data/04_geometry_tables/*/` contain per-pixel I/F (`iof`) and geometric angles (`incidence`, `emission`, `phase`) suitable for disk-resolved disk-function fitting (e.g., Minnaert). These files record pixel-level viewing geometry and are the source for `data/05_silver_layer/*_resolved_sample.parquet` derived samples.
+
+- **Disk-Integrated (per-bin / phase-curve) products:** Aggregated CSVs under `data/05_aggregated/` summarize binned I/F vs phase (one row per phase-angle bin) used for Hapke parameter inference and baseline phase-curve comparisons. These products are intentionally coarser and serve a different statistical contract than disk-resolved samples.
+
+## ADR-003: Multi-Phase Dataset Integration and Pivot to Hapke Physical Modeling
+
+Status: Accepted (2026-05-08)
+
+### Context
+
+- **Track 1 limitation (Minnaert):** The initial Minnaert fit used only RC (Rotational Characterization) phase data. This introduced a ~50 degree phase-angle gap (12 deg to 62 deg), making global extrapolation of $k_0$ and $\beta$ mathematically unstable and physically unrealistic.
+- **Geometric noise source:** Using an ellipsoid shape model instead of a high-resolution DTM produced ~14% RMS residuals in the Minnaert baseline, because unresolved local topography (shadows/craters/slopes) leaked into residual structure.
+- **Data scale constraint:** The raw mission corpus is very large (~730M pixels), so extraction must be high-throughput and memory-efficient.
+
+### Decisions
+
+- **Dataset combination:** Merge RC and Survey mission phases into one disk-resolved Silver Layer to close the phase-angle gap before global model fitting.
+- **Sampling strategy:** Use DuckDB native Bernoulli sampling (`USING SAMPLE 1% (bernoulli)`) to obtain a statistically representative and computationally efficient extraction subset.
+- **Model pivot (Track 2):** Transition from empirical Minnaert parameterization to Hapke IMSA physical modeling, replacing the power-law representation with physical parameters ($w, g, \bar{\theta}, B_0, h$).
+- **Topography handling contract:** Explicitly use Hapke macroscopic roughness ($\bar{\theta}$) to absorb unresolved geometric residuals introduced by missing DTM-scale terrain fidelity.
+
+### Consequences
+
+- **Improved phase lever arm:** Combined RC + Survey coverage now spans a near-continuous 8 deg to 80 deg phase range, enabling physically legitimate phase-function fitting.
+- **Statistical power for binning:** The ~7.3M-row sample supports dense $5^\circ \times 5^\circ \times 5^\circ$ 3D binning with materially better stability than RC-only subsets.
+- **Optimization complexity increase:** The inference stack moves from linear regression toward constrained non-linear `least_squares` optimization with `soft_l1` robust loss.
+
+- **Rationale:** Keeping these products distinct preserves correct statistical assumptions: disk-integrated fits constrain global phase behavior while disk-resolved samples enable explicit disk-function parameter estimation (limb-darkening `k`, local albedo variation). Transformations and weights applied to each product type are recorded in the pipeline and in this architecture diary.

@@ -1,0 +1,48 @@
+name: Python CI
+
+on:
+  push:
+    branches:
+      - main
+      - feature/**
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Upgrade pip
+        run: python -m pip install --upgrade pip
+
+      - name: Install core dependencies
+        run: |
+          python -m pip install numpy pandas torch pytest
+
+      - name: Install project (editable) if packaging metadata exists
+        shell: bash
+        run: |
+          if [[ -f "pyproject.toml" || -f "setup.py" ]]; then
+            python -m pip install -e .
+          else
+            echo "No pyproject.toml or setup.py found; skipping editable install."
+          fi
+
+      - name: Print Python version and installed packages
+        run: |
+          python --version
+          python -m pip list
+
+      - name: Run tests
+        run: |
+          pytest tests/ -vv -s

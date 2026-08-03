@@ -19,6 +19,12 @@ class FitResult:
     objective_value: float
     metadata: dict[str, Any] = field(default_factory=dict)
 
+    # Expected metadata keys (added by fitters):
+    # - "parameter_errors": dict[str, float] (standard errors for fitted params)
+    # - "parameter_covariance": list[list[float]] (covariance matrix of fitted params)
+    # - "reduced_chi_square": float (reduced chi-square of the fit)
+    # - "boundary_hits": dict[str, bool] (which parameters hit bounds)
+
 
 @dataclass
 class MCMCFitResult(FitResult):

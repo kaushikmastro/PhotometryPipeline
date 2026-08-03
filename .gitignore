@@ -33,6 +33,9 @@ logs/
 data/
 output/
 
+# Ad-hoc / one-off diagnostic and debugging scripts (preserved on disk, not tracked)
+scripts/adhoc/
+
 # Local SPICE / metakernels
 *.tm
 !*.template.tm
