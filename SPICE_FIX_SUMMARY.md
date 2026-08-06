@@ -28,7 +28,7 @@ _download_reconstructed_spk_kernels()
     - Ceres post-encounter (2015-2016)
 
 _generate_dynamic_metakernel()
-  → Creates dawn_dynamic.tm with ALL available kernels
+  → Creates dawn_dynamic.tm with ALL available kernelsl
   → Replaces fixed-path metakernel with dynamic discovery
   → Ensures new kernels are automatically included
 ```
@@ -74,7 +74,7 @@ TOTAL:                      99 kernels (previously ~40)
 ✓ `dawn_rec_110928-111102_120615_v1.bsp` (Sept 1 - Nov 2)
 
 ### Dynamic Metakernel
-- **File**: `data/02_spice_kernels/dawn_dynamic.tm`
+- **File**: `data/spice_kernels/dawn_dynamic.tm`
 - **Size**: 3,715 bytes
 - **Kernels Listed**: 99 (all currently available)
 - **Format**: SPICE KPL format, fully compatible with spiceypy.furnsh()
@@ -180,7 +180,7 @@ When the job runs (estimated 1-4 hours depending on compute node speed):
 - SPICE can now accurately determine Dawn's position at the exact observation times (Aug 11, 2011 18:y:00 UTC)
 
 ### Future-Proofing
-- If new kernels are added to `02_spice_kernels/`, just run `update_spice_kernels.py` again
+- If new kernels are added to `spice_kernels/`, just run `update_spice_kernels.py` again
 - Dynamic metakernel will auto-include them without code changes
 - This pattern scales to Ceres observations and beyond
 

@@ -2,6 +2,24 @@
 
 This document is the permanent engineering diary for the unified Dawn FC geometry pipeline. It records the final architecture decisions, the failure modes that previously broke production runs, and the controls now in place.
 
+---
+
+## OPEN VERIFICATION ITEMS
+
+- [x] **DSK identity confirmed** (2026-06-03): original `vesta_gaskell_256.bds` was a pre-Dawn
+      preliminary Gaskell model (41,335,808 bytes, file date 2011-02-18,
+      SHA-256 `6106b2a7...c26ea34b`). Size mismatch against both NAIF variants (~48 MB each)
+      confirmed it is not in the NAIF archive. Renamed to `vesta_gaskell_256_PRELIM_preDawn.bds`.
+      Replaced with the mission-science model `vesta_gaskell_256_110825.bds`
+      (48,022,528 bytes, SHA-256 `b9c3c81a...dca48edc`). Metakernel updated.
+- [x] **repo = /scratch confirmed** (2026-06-02): `data/` is a symlink to
+      `/scratch/kaushim07/vesta_data`. One write covers both.
+- [ ] **Shape-model comparison fit pending** (2026-06-03): SLURM jobs 25770898 (geometry,
+      running) and 25770899 (fit, pending afterok). Update with comparison table when
+      `logs/fit_110825_25770899.out` is complete.
+
+---
+
 ## The I/F Reflectance Physics
 
 Root cause and correction:
@@ -17,6 +35,88 @@ Historical-data policy decision:
 - The retroactive repair approach using scripts/fix_parquet_iof.py was abandoned.
 - Reason: integer-casting side effects in the backfill path corrupted historical Survey and HAMO parquet outputs.
 - Permanent policy is now Unified Clean Processing: regenerate all phase outputs through the same production SPICE geometry engine, not post-hoc patch scripts.
+
+## CALIBRATION CRISIS AND RECOVERY (2026-05-18)
+
+**CRITICAL CORRECTION:** The above "percent-to-ratio conversion" description was **physically incorrect** and has been superseded by this entry. The division by 100.0 was invalid; all parquet files computed under that method are scientifically unreliable.
+
+### The True Crisis
+
+The original I/F calibration computed as `raw_image / 100.0` was physically unfounded. Dawn FC2 Level 1b calibrated images have **UNIT = W/(m²·sr)** confirmed across all four phases (RC, Survey, HAMO, LAMO) via direct PDS label inspection. Division by 100 has no physical or unit justification. **All parquet files computed under the original engine were invalid.** Full reprocessing was required.
+
+### Correct Calibration Equation — Now Implemented
+
+$$I/F = \frac{L \cdot \pi \cdot d_{\text{AU}}^2}{F_{\odot}}$$
+
+**Where:**
+- $L$ = pixel value in W·m⁻²·sr⁻¹ from PDS-confirmed LBL UNIT field  
+- $\pi$ = 3.14159265358979  
+- $d_{\text{AU}}$ = heliocentric distance of Vesta in AU, computed from SPICE at observation epoch using `spiceypy.spkpos()` and `spiceypy.convrt()` per image  
+- $F_{\odot}$ = **1473.4 W·m⁻²** for FC2 F1 clear filter at 1 AU  
+  **Source:** Schröder et al. 2013, *Icarus* 226, 1304–1317. "In-flight calibration of the Dawn Framing Camera"
+
+### Implementation — geometry_engine.py
+
+**Lines 413–416: Per-image SPICE distance calculation**
+```python
+sun_pos, _ = spiceypy.spkpos("SUN", et, "J2000", "LT+S", self.target)
+dist_km = float(spiceypy.vnorm(sun_pos))
+distance_au = spiceypy.convrt(dist_km, "KM", "AU")
+```
+
+**Line 111: I/F equation with $d^2$ scaling**
+```python
+iof_data = (np.asarray(raw_image, dtype=np.float32) * np.pi * (distance_au ** 2)) / 1473.4
+```
+
+All three requirements verified:
+- ✅ Dynamic SPICE distance calculation per image using `spkpos()` + `vnorm()`  
+- ✅ Conversion from kilometers to AU using `convrt()`  
+- ✅ Final I/F equation exactly applies (Radiance · π · d_AU² ) / F_solar
+
+### Reprocessing Outcome — Corrected Data Validated
+
+DuckDB validation query results:
+- **MIN I/F = 0.010**, **AVG I/F = 0.088**, **MAX I/F = 0.239**  
+- Physical range consistent with known Vesta surface properties  
+- **RC average I/F = 0.119** at mean phase **21.6°**  
+- **Survey average I/F = 0.085** at mean phase **45.2°**  
+- **Phase-dependent brightness gradient confirms physically correct calibration**
+
+### Two-Parameter Hapke Fit Results (Corrected Data)
+
+**Dataset:** 2390 safe geometry cubes, ellipsoid model, 80° emission cutoff
+
+**Fitted parameters:**
+- $w = 0.2994 \pm 0.0017$  
+- $g = -0.3879 \pm 0.0028$  
+- **RMS: 27.39%**
+
+**Interpretation:** Expected ellipsoid penalty. Comparison between 60° and 80° emission cutoffs quantifies the Ellipsoid model bias as ~0.04–0.06 in $w$. This is a known limitation, not a calibration failure.
+
+### DSK Kernel Requirement
+
+**Status:** [PENDING DOWNLOAD]  
+**Source:** `naif.jpl.nasa.gov/pub/naif/DAWN/kernels/dsk/`  
+
+Raster DTMs in `03_dtm/` cannot be used by SPICE directly. DSK binary kernel required for high-fidelity shape-model intersections.
+
+### Prevention Controls (Permanent)
+
+1. **PDS UNIT verification** mandatory in `calibrate_iof_data()` — raises `CalibrationError` if UNIT ≠ W/(m²·sr)  
+2. **Heliocentric distance** computed via SPICE per image using `spkpos()` + `vnorm()` + `convrt()`  
+3. **I/F physical range validation** after computation — rejects if min < −0.01 or max > 1.05  
+4. **Hard rejection guardrail** on out-of-tolerance I/F; within-tolerance clipped to [0.0, 1.0]  
+5. **Primary source citation** required in calibration docstring (Schröder et al. 2013)
+
+### Git and Merge Strategy
+
+- **Main branch:** Locked; documents old incorrect calibration with warning label  
+- **Correction branch:** `fix/calibration-iof-correction` (all corrected work)  
+- **Merge gate (v2.0.0):** Requires  
+  1. DSK kernel downloaded and metakernel updated  
+  2. Three-parameter fit produces $w$ near 0.38 and RMS < 10%  
+  3. Architecture diary complete (this entry)
 
 ## The SPICE Engine & Kernel Gaps
 
@@ -136,6 +236,48 @@ Live run status:
 
 Timeout incident and resume strategy:
 - Incident: Survey phase processing timed out under SLURM in Job `25514161`.
+
+## Pipeline Validation Status
+
+This section records the absolute-calibration checks that must pass before any new SLURM submission.
+
+### Step 1: FC2 F1 solar-flux verification
+
+- Local archive search under `data/` did not find a PDS document containing the FC2 F1 clear-filter solar-flux value.
+- The archive copy is therefore absent in the workspace and the published source must be obtained from Sierks et al. 2011.
+- The current working constant, `1473.4 W/m^2`, exceeds the solar constant `1361 W/m^2` and is physically impossible as an incident solar flux at 1 AU.
+- Processing must halt until the solar-flux source and value are corrected.
+
+### Step 2: Absolute calibration sanity check
+
+- Geometry: incidence = 43°, emission = 21°, phase = 29°.
+- Measured mean HAMO I/F = 0.088.
+- DSK two-parameter fit, with opposition and roughness disabled: `w = 0.2994`, `g = -0.3879`.
+- Predicted I/F = `0.0716`.
+- Absolute percent difference vs measured mean HAMO I/F = `18.66%`.
+- Result: within the requested 20% threshold.
+
+### Step 3: Li et al. parameter reproduction test
+
+- Published Li et al. 2013 Table 5 values: `w = 0.38`, `g = -0.50`, `theta_bar = 17.7°`, `B0 = 1.7`, `h = 0.07`.
+- Same HAMO mean geometry: incidence = 43°, emission = 21°, phase = 29°.
+- Predicted I/F = `0.0831`.
+- Absolute percent difference vs measured mean HAMO I/F = `5.53%`.
+- Result: within the requested 15% threshold, so the absolute calibration is consistent with the published photometry at this test point.
+
+### Corrected F_solar Validation Results
+
+- Li et al. 2013 Table 2 Case 3 validation on geometries A/B/C matched the nearest cube mean I/F to within `0.23%`, `0.45%`, and `0.27%`, respectively.
+- Case 1 fit with `B0 = 1.03` and `h = 0.04` fixed converged to `w = 0.5106 ± 0.0003`, `g = -0.2936 ± 0.0004`, and `theta_bar = 17.51° ± 0.03°`, with fractional RMS `1.35%` and cost `53.0`.
+- Case 2 fit with `B0 = 1.03` fixed and `h` free converged to `w = 0.5113 ± 0.0004`, `g = -0.2941 ± 0.0004`, `theta_bar = 17.50° ± 0.03°`, and `h = 0.0763 ± 0.0016`, with fractional RMS `1.33%` and cost `41.5`.
+- Direct HAMO parquet validation gives mean I/F `0.06626`, or `0.753x` the old `0.088` reference, while the expected solar-flux-scaled mean remains `0.14536` from `1473.4 / 892.0`.
+- The corrected 3,094-cube dataset spans mean I/F `[0.0341, 0.2893]`, satisfies `std_iof <= mean_iof` for all cubes, and shows the expected phase trend from `0.2662` at low phase (`<= 10°`, `n = 108`) to `0.0775` at high phase (`>= 80°`, `n = 340`).
+- Latest direct repository validation on the same corrected 3,094-cube surface reproduced Case 1 as `w = 0.4303`, `g = -0.3578`, `theta_bar = 0.6431`, cost `42.15`, and Case 2 as `w = 0.4251`, `g = -0.3473`, `theta_bar = 2.289`, `h = 0.0560`, cost `42.06`; both fits succeeded but do not match the earlier wrapper-based target values.
+- The step1 forward-model check on the direct repository implementation returned percent differences of `1.36%`, `15.97%`, and `20.77%` for geometries A/B/C, so the current model still misses the all-three-within-15% validation gate.
+
+### Validation decision
+
+- Do not submit any SLURM jobs until the FC2 F1 solar-flux source is corrected to a physically valid value and the calibration record is updated accordingly.
 - Resolution: a resume strategy is implemented via file-existence checks before geometry execution.
 - Engineering requirement: prevent redundant computation of 16,000+ existing HAMO/LAMO geometry outputs by verifying target parquet paths before initiating ray-tracing.
 - Current pending workload: 850 Survey images and 423 RC images.
@@ -148,7 +290,7 @@ Subset execution architecture decision:
 Finish-script verification and integrity status:
 - Verification: the finish script operates with file-level manifest logic, not folder-level gating.
 - Integrity: 303 existing Survey parquet outputs are preserved.
-- Redundant computation is avoided by cross-referencing `01_calibrated_images` inputs against `04_geometry_tables` outputs at the individual image stem level before ray-tracing is queued.
+- Redundant computation is avoided by cross-referencing `calibrated_raw_images` inputs against `04_geometry_tables` outputs at the individual image stem level before ray-tracing is queued.
 
 SPICE ray-tracer masking decision:
 - Event: replaced strict image-level finiteness validation with pixel-level boolean masking in the geometry ray-tracing path.
@@ -283,3 +425,118 @@ Status: Accepted (2026-05-08)
 - **Optimization complexity increase:** The inference stack moves from linear regression toward constrained non-linear `least_squares` optimization with `soft_l1` robust loss.
 
 - **Rationale:** Keeping these products distinct preserves correct statistical assumptions: disk-integrated fits constrain global phase behavior while disk-resolved samples enable explicit disk-function parameter estimation (limb-darkening `k`, local albedo variation). Transformations and weights applied to each product type are recorded in the pipeline and in this architecture diary.
+
+---
+
+## SHAPE MODEL PROVENANCE AND THE SPG-vs-SPC DISTINCTION
+*(Added 2026-06-02 after disk audit. Addresses paper methods section and θ̄ attribution.)*
+
+### What we originally used — and what was wrong with it
+
+**Original DSK (pre-Dawn preliminary model — all existing fits used this):**
+- Filename (current): `data/spice_kernels/vesta_gaskell_256_PRELIM_preDawn.bds`
+  (renamed from `vesta_gaskell_256.bds` on 2026-06-03)
+- Size: 41,335,808 bytes. File date: 2011-02-18.
+- SHA-256: `6106b2a7d47030419faf083134480f9bceea595276d3d004ea862280c26ea34b`
+- Identity confirmed by hash comparison: does NOT match either NAIF 256-tile archive entry
+  (110726: 48,013,312 bytes; 110825: 48,022,528 bytes). The ~16% smaller size and
+  2011-02-18 file date — five months before Dawn Vesta orbit insertion (2011-07-16) —
+  establish this as a **pre-mission Gaskell SPC model**, built from Hubble/ground-based
+  photometry, not from Dawn FC data. It was not archived by NAIF.
+- Consequence: ALL geometry and fit results prior to 2026-06-03 used pre-mission shape-model
+  normals with uncertain accuracy relative to the actual Vesta surface.
+
+**Current DSK (mission-science model — now loaded):**
+- File: `data/spice_kernels/vesta_gaskell_256_110825.bds`
+- Size: 48,022,528 bytes. Downloaded 2026-06-03.
+- SHA-256: `b9c3c81ae6dd8c33930e44acdafca98521d4141b6649e66562217617dca48edc`
+- Source: `naif.jpl.nasa.gov/pub/naif/DAWN/kernels/dsk/old_versions/vesta_gaskell_256_110825.bds`
+- Provenance (verbatim from `vesta_gaskell_256_110825.cmt`):
+  > "Data were provided to NAIF by Dr. Robert Gaskell, on August 25, 2011. The original file
+  > had Gaskell 'Q' parameter 512; input data for this file were obtained by downsampling the
+  > original data set to a Q value of 256. This file was created by Nat Bachman (NAIF)
+  > for the DAWN mission." MKDSK run date: 2011-09-01T04:22:17.
+- Metakernel change (dawn_dynamic.tm line 362):
+  - Before: `'$SPICE/vesta_gaskell_256.bds'`
+  - After:  `'$SPICE/vesta_gaskell_256_110825.bds'`
+
+### What Li et al. (2013) used
+- **Method**: Preusker & Jaumann **SPG** (stereophotogrammetry), derived from Dawn LAMO images.
+- **Resolution**: ~80 m/pixel (one order of magnitude coarser than our DSK256).
+- **Key difference**: SPC and SPG are distinct reconstruction algorithms with different noise
+  characteristics, albedo-topography coupling, and normal-vector accuracy. They are not
+  simply different resolutions of the same product.
+
+### Attribution of the θ̄ discrepancy
+Our Case 1 θ̄ ≈ 5.5° vs Li et al. θ̄ ≈ 17.5°. The current abstract wording "higher resolution"
+is a **simplification**. The discrepancy is attributable to at least two confounded factors:
+
+1. **Resolution**: Coarser pixel scale leaves sub-pixel roughness unresolved, forcing the
+   optimizer to absorb it into θ̄. Our 18 m DSK256 resolves terrain that their ~80 m product
+   cannot, so our fitted θ̄ captures only sub-18m roughness while theirs captures sub-80m.
+
+2. **Reconstruction method and epoch**: Gaskell SPC (our model) vs Preusker/Jaumann SPG
+   (Li et al. model) differ in how they treat albedo-topography coupling. SPC can produce
+   systematically different surface normals from SPG even at matched resolution, because SPC
+   uses photometric consistency across images while SPG uses geometric parallax. The 2011
+   vs post-LAMO epoch difference also means different orbital coverages were used.
+
+### Shape-model comparison experiment (in progress, 2026-06-03)
+
+**Goal**: determine whether the low θ̄ (≈5.5°) from prior fits was caused by the pre-Dawn
+preliminary shape model, and whether switching to the mission-science model brings θ̄ closer
+to Li et al.'s value (≈17.5°).
+
+**Jobs submitted:**
+- `geom_110825` (SLURM 25770898): geometry on 845 Survey F1B images using 110825 DSK,
+  writing to `data/geometry/dsk256/survey/`.
+- `fit_110825` (SLURM 25770899, afterok): builds `combined_survey_sample_110825.parquet`,
+  runs three-case Li et al. fit (Survey-only, i<50°, e<50°, n≥10, 100 multi-starts).
+
+**Scripts**: `scripts/run_geometry_110825.py`, `scripts/build_silver_110825.py`,
+`scripts/run_fit_110825.py`, `scripts/submit_geometry_110825.sh`, `scripts/submit_fit_110825.sh`.
+
+**Decision tree (to be filled in from** `logs/fit_110825_25770899.out`**):**
+
+| Outcome | Interpretation |
+|---------|---------------|
+| w, g stable; θ̄ rises to ≈15–20° | Pre-Dawn model caused θ̄ collapse. 110825 result is the correct value. θ̄ difference vs Li et al. is shape-model resolution/reconstruction, not a code artifact. |
+| w, g stable; θ̄ still ≤6° | Low θ̄ is robust across both shape models. Report as confirmed finding. Attribute θ̄ difference to resolution alone. |
+| w, g shift >0.05 | Prior fits were shape-model-dependent. Investigate which result is physically correct before submitting the paper. |
+
+**UPDATE THIS TABLE when** `logs/fit_110825_25770899.out` **is available.**
+
+### What would be needed for a clean attribution
+- **Isolate resolution effect**: Run our pipeline on Gaskell SPC at 64 and 128 tiles/face
+  (lower-resolution versions of the same reconstruction), keeping method constant.
+  If θ̄ rises as resolution decreases, resolution is causal.
+- **Match Li et al. exactly**: Obtain and load the Preusker/Jaumann SPG model as a SPICE DSK,
+  then rerun our geometry pipeline on the same images Li et al. used. If θ̄ then matches their
+  value, the model choice (not the code) is causal.
+
+**Both experiments are OPEN — not yet done.** Until they are, the paper must say
+"attributable to differences in both shape-model resolution and reconstruction method"
+rather than "higher resolution alone."
+
+### Geometry engine is shape-model-agnostic
+The geometry engine (`src/hapke_mcmc_package/etl/geometry_engine.py`) is fully agnostic
+to which DSK is loaded. `spiceypy.sincpt("DSK/UNPRIORITIZED", ...)` and
+`spiceypy.illumf("DSK/UNPRIORITIZED", ...)` operate on whatever DSK binary is in the SPICE pool.
+
+**Swapping SPG for SPC is a metakernel change only** — replace the `vesta_gaskell_256.bds`
+line in `dawn_dynamic.tm` with the SPG DSK path. No code changes required.
+
+### f_solar — corrected historical note
+The CALIBRATION CRISIS AND RECOVERY entry (2026-05-18) records `F_solar = 1473.4 W/m²`
+as the "correct" value and cites Schröder et al. 2013. This is superseded by the SETTLED
+finding recorded in `# CLAUDE.md`:
+
+- **Value in production code** (`geometry_engine.py` line 168): `f_solar: float = 892.0  # 1473.4`
+- **Provenance of 892.0**: Derived via Albedo Anchor from Li et al. 2013 Table 2 Case 3;
+  cross-validated by blackbody (846 W/m²) and ASTM E490 (930 W/m²) FC2 bandpass integrals.
+  The value 892.0 is **not directly tabulated in any paper** and must not be cited as such.
+  Sierks et al. 2011 Table 9 gives FC2 F1 responsivity in DN·s⁻¹/(W·m⁻²·sr⁻¹), not solar flux.
+- **1473.4 W/m²** exceeds the solar constant (1361 W/m²) and is physically impossible.
+  It is retained in code comments only as a historical trace. The earlier CALIBRATION CRISIS
+  entry citing 1473.4 records an investigation in progress at the time and does not reflect
+  final production state.

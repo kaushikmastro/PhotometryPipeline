@@ -34,8 +34,8 @@ class DataManager:
         """
         self.manifest_path = Path(manifest_path)
         self.data_root = Path(data_root)
-        self.image_dir = self.data_root / "01_calibrated_images"
-        self.spice_dir = self.data_root / "02_spice_kernels"
+        self.image_dir = self.data_root / "calibrated_raw_images"
+        self.spice_dir = self.data_root / "spice_kernels"
         self.dtm_dir = self.data_root / "03_dtm"
         self.dtm_geometry_label_url = (
             "https://sbnarchive.psi.edu/pds3/dawn/fc/DWNVSPG_2/GEOMETRY/dawn_vesta_SPG20160901.lbl"
@@ -1348,9 +1348,9 @@ if __name__ == "__main__":
         f.write("image2.IMG\n")
 
     data_dir = Path("data")
-    (data_dir / "01_calibrated_images").mkdir(parents=True, exist_ok=True)
-    (data_dir / "02_spice_kernels").mkdir(parents=True, exist_ok=True)
-    (data_dir / "02_spice_kernels" / "vesta_v01.tm").touch()
+    (data_dir / "calibrated_raw_images").mkdir(parents=True, exist_ok=True)
+    (data_dir / "spice_kernels").mkdir(parents=True, exist_ok=True)
+    (data_dir / "spice_kernels" / "vesta_v01.tm").touch()
 
     manager = DataManager(manifest_path="configs/survey_manifest.csv", data_root=str(data_dir))
     if not manager.validate_data_ready():

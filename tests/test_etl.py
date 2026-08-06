@@ -37,8 +37,8 @@ class TestDataManager(unittest.TestCase):
         self.root = Path(self.tmpdir.name)
         self.manifest = self.root / "survey_manifest.csv"
         self.data_root = self.root / "data"
-        (self.data_root / "01_calibrated_images").mkdir(parents=True, exist_ok=True)
-        (self.data_root / "02_spice_kernels").mkdir(parents=True, exist_ok=True)
+        (self.data_root / "calibrated_raw_images").mkdir(parents=True, exist_ok=True)
+        (self.data_root / "spice_kernels").mkdir(parents=True, exist_ok=True)
         (self.data_root / "03_dtm").mkdir(parents=True, exist_ok=True)
 
         with self.manifest.open("w", newline="") as fh:
@@ -55,16 +55,16 @@ class TestDataManager(unittest.TestCase):
         self.assertFalse(manager.validate_data_ready())
 
     def test_validate_data_ready_true_when_files_exist(self):
-        (self.data_root / "01_calibrated_images" / "A.IMG").touch()
-        (self.data_root / "01_calibrated_images" / "B.IMG").touch()
-        (self.data_root / "02_spice_kernels" / "vesta.tm").touch()
+        (self.data_root / "calibrated_raw_images" / "A.IMG").touch()
+        (self.data_root / "calibrated_raw_images" / "B.IMG").touch()
+        (self.data_root / "spice_kernels" / "vesta.tm").touch()
 
         manager = DataManager(str(self.manifest), str(self.data_root))
         self.assertTrue(manager.validate_data_ready())
 
     @patch("hapke_mcmc_package.etl.ingestion.requests.get")
     def test_download_missing_data_downloads_img_and_lbl(self, mock_get):
-        (self.data_root / "01_calibrated_images" / "A.IMG").touch()
+        (self.data_root / "calibrated_raw_images" / "A.IMG").touch()
         mock_get.return_value = DummyResponse(payload=b"ok")
 
         manager = DataManager(
@@ -75,8 +75,8 @@ class TestDataManager(unittest.TestCase):
         with patch.object(Path, "resolve", return_value=Path("/scratch/test_data")):
             manager.download_missing_data()
 
-        self.assertTrue((self.data_root / "01_calibrated_images" / "B.IMG").exists())
-        self.assertTrue((self.data_root / "01_calibrated_images" / "B.LBL").exists())
+        self.assertTrue((self.data_root / "calibrated_raw_images" / "B.IMG").exists())
+        self.assertTrue((self.data_root / "calibrated_raw_images" / "B.LBL").exists())
         self.assertGreaterEqual(mock_get.call_count, 2)
 
     def test_construct_image_url_builds_candidate_paths(self):
@@ -146,10 +146,10 @@ KERNELS_TO_LOAD = (
         mock_download.side_effect = fake_download
         ok = manager.download_spice_kernels()
         self.assertTrue(ok)
-        self.assertTrue((self.data_root / "02_spice_kernels" / "vesta_survey.tm").exists())
-        self.assertTrue((self.data_root / "02_spice_kernels" / "a.bsp").exists())
-        self.assertTrue((self.data_root / "02_spice_kernels" / "b.bc").exists())
-        self.assertTrue((self.data_root / "02_spice_kernels" / "c.tf").exists())
+        self.assertTrue((self.data_root / "spice_kernels" / "vesta_survey.tm").exists())
+        self.assertTrue((self.data_root / "spice_kernels" / "a.bsp").exists())
+        self.assertTrue((self.data_root / "spice_kernels" / "b.bc").exists())
+        self.assertTrue((self.data_root / "spice_kernels" / "c.tf").exists())
 
     @patch("hapke_mcmc_package.etl.ingestion.time.sleep", return_value=None)
     @patch("hapke_mcmc_package.etl.ingestion.requests.get")
@@ -162,7 +162,7 @@ KERNELS_TO_LOAD = (
         mock_get.side_effect = [RequestException("drop"), RequestException("drop"), DummyResponse()]
         manager = DataManager(str(self.manifest), str(self.data_root))
 
-        target = self.data_root / "01_calibrated_images" / "retry.IMG"
+        target = self.data_root / "calibrated_raw_images" / "retry.IMG"
         manager._download_file_with_retries("https://example.test/retry.IMG", target, max_retries=3)
 
         self.assertTrue(target.exists())

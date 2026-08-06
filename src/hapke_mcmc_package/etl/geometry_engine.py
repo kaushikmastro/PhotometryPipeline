@@ -194,7 +194,7 @@ class GeometryEngine:
     ):
         """Initialize SPICE environment. Backward-compatible signature matching for standalone scripts."""
         self.data_root = Path(data_root)
-        self.spice_dir = self.data_root / "02_spice_kernels"
+        self.spice_dir = self.data_root / "spice_kernels"
         self.output_dir = self.data_root / output_subdir
         self._planetaryimage = _load_planetaryimage_module()
 
