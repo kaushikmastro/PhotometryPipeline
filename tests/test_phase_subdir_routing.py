@@ -13,12 +13,12 @@ ROUTE = GeometryEngine._phase_subdir_from_image_path
 @pytest.mark.parametrize(
     "path,expected",
     [
-        (Path("/data/01_calibrated_images/hamo/FC21HAMO_0001.IMG"), "hamo"),
-        (Path("/data/01_calibrated_images/survey/FC21SURVEY_0001.IMG"), "survey"),
-        (Path("/data/01_calibrated_images/lamo/FC21LAMO_0001.IMG"), "lamo"),
-        (Path("/data/01_calibrated_images/rc/FC21RC_0001.IMG"), "rc"),
+        (Path("/data/calibrated_raw_images/hamo/FC21HAMO_0001.IMG"), "hamo"),
+        (Path("/data/calibrated_raw_images/survey/FC21SURVEY_0001.IMG"), "survey"),
+        (Path("/data/calibrated_raw_images/lamo/FC21LAMO_0001.IMG"), "lamo"),
+        (Path("/data/calibrated_raw_images/rc/FC21RC_0001.IMG"), "rc"),
         # case-insensitivity
-        (Path("/data/01_calibrated_images/HAMO/FC21HAMO_0002.IMG"), "hamo"),
+        (Path("/data/calibrated_raw_images/HAMO/FC21HAMO_0002.IMG"), "hamo"),
     ],
 )
 def test_phase_subdir_routes_correctly_when_phase_in_path(path: Path, expected: str) -> None:
@@ -32,7 +32,7 @@ def test_phase_subdir_defaults_to_survey_when_no_phase_in_path() -> None:
     doesn't contain any of those four names, so its outputs landed in the
     committed survey/ baseline.
     """
-    path = Path("/data/01_calibrated_images/user_roi_images/FC21B0009981_11284200337F1G.IMG")
+    path = Path("/data/calibrated_raw_images/user_roi_images/FC21B0009981_11284200337F1G.IMG")
 
     assert ROUTE(path) == "survey"
 
@@ -57,7 +57,7 @@ def test_phase_subdir_function_itself_emits_no_warning_on_silent_default(
     this test to match the improved behavior.
     """
     with caplog.at_level(logging.WARNING):
-        result = ROUTE(Path("/data/01_calibrated_images/user_roi_images/FC21B0009981.IMG"))
+        result = ROUTE(Path("/data/calibrated_raw_images/user_roi_images/FC21B0009981.IMG"))
 
     assert result == "survey"
     assert caplog.records == [], (

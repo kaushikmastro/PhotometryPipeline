@@ -16,7 +16,7 @@ import run_geometry  # noqa: E402
 
 # This test guards against tonight's silent-contamination bug: run_geometry.py
 # used to hardcode output_subdir from --mode, which didn't match the real
-# committed baseline location (04_geometry_tables_dsk256_110825) and would
+# committed baseline location (geometry/dsk256) and would
 # have silently reprocessed/duplicated the whole committed dataset. The fix
 # makes --output-subdir required with no default, so a missing destination
 # fails loudly at argparse time instead of silently writing to the wrong place.
@@ -59,10 +59,10 @@ def test_output_subdir_accepted_when_provided(monkeypatch: pytest.MonkeyPatch, t
             "--data-root", str(tmp_path),
             "--metakernel", str(tmp_path / "fake.tm"),
             "--mode", "DSK256",
-            "--output-subdir", "04_geometry_tables_dsk256_110825",
+            "--output-subdir", "geometry/dsk256",
         ],
     )
 
     run_geometry.main()  # no .IMG files under tmp_path -> empty worklist -> clean early return
 
-    assert (tmp_path / "04_geometry_tables_dsk256_110825").is_dir()
+    assert (tmp_path / "geometry/dsk256").is_dir()

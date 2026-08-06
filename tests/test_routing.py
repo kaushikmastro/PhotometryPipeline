@@ -14,14 +14,14 @@ from run_geometry import REQUIRED_COLUMNS, discover_worklist  # noqa: E402
 
 # NOTE: this file previously tested build_worklist(), a manifest-CSV-driven
 # worklist builder that no longer exists in run_geometry.py (the pipeline now
-# globs 01_calibrated_images/**/*.IMG directly, no manifest). These tests
+# globs calibrated_raw_images/**/*.IMG directly, no manifest). These tests
 # target the current discover_worklist(input_images, target_output_root)
 # function instead, which is what compute_geometry() results are actually
 # skip-checked against today.
 
 
 def _touch_img(root: Path, phase: str, stem: str) -> Path:
-    img_path = root / "01_calibrated_images" / phase / f"{stem}.IMG"
+    img_path = root / "calibrated_raw_images" / phase / f"{stem}.IMG"
     img_path.parent.mkdir(parents=True, exist_ok=True)
     img_path.write_bytes(b"ok")
     return img_path
@@ -61,7 +61,7 @@ def _write_corrupted_file(path: Path) -> None:
 
 def test_discover_worklist_includes_all_four_phases(tmp_path: Path) -> None:
     data_root = tmp_path / "data"
-    output_root = tmp_path / "04_geometry_tables_dsk256_110825"
+    output_root = tmp_path / "geometry/dsk256"
 
     images = [
         _touch_img(data_root, "survey", "FC21SURVEY_0001"),
@@ -82,7 +82,7 @@ def test_discover_worklist_includes_all_four_phases(tmp_path: Path) -> None:
 def test_discover_worklist_skips_existing_valid_parquet(tmp_path: Path) -> None:
     """Item 4: an existing, schema-valid, readable parquet must be skipped."""
     data_root = tmp_path / "data"
-    output_root = tmp_path / "04_geometry_tables_dsk256_110825"
+    output_root = tmp_path / "geometry/dsk256"
 
     done_img = _touch_img(data_root, "lamo", "FC21LAMO_0100")
     pending_img = _touch_img(data_root, "rc", "FC21RC_0200")
@@ -100,7 +100,7 @@ def test_discover_worklist_reprocesses_corrupted_parquet(tmp_path: Path) -> None
     tonight (unreadable-as-parquet -> exception -> re-queued, not skipped).
     """
     data_root = tmp_path / "data"
-    output_root = tmp_path / "04_geometry_tables_dsk256_110825"
+    output_root = tmp_path / "geometry/dsk256"
 
     img = _touch_img(data_root, "hamo", "FC21HAMO_9999")
     _write_corrupted_file(output_root / "hamo" / "FC21HAMO_9999_geometry.parquet")
@@ -115,7 +115,7 @@ def test_discover_worklist_reprocesses_schema_mismatched_parquet(tmp_path: Path)
     also be re-queued, not trusted just because it opens successfully.
     """
     data_root = tmp_path / "data"
-    output_root = tmp_path / "04_geometry_tables_dsk256_110825"
+    output_root = tmp_path / "geometry/dsk256"
 
     img = _touch_img(data_root, "survey", "FC21SURVEY_5555")
     _write_schema_mismatched_parquet(output_root / "survey" / "FC21SURVEY_5555_geometry.parquet")
@@ -132,7 +132,7 @@ def test_discover_worklist_diff_exact_no_off_by_one_no_duplicates(tmp_path: Path
     with no duplicates.
     """
     data_root = tmp_path / "data"
-    output_root = tmp_path / "04_geometry_tables_dsk256_110825"
+    output_root = tmp_path / "geometry/dsk256"
 
     img_done_valid = _touch_img(data_root, "hamo", "FC21HAMO_0001")
     img_done_corrupt = _touch_img(data_root, "hamo", "FC21HAMO_0002")

@@ -148,7 +148,7 @@ NOTE: LAMO mean_iof=0.082 is lower than Survey/HAMO (0.103/0.106) due to
   edge cases, below 0.01% threshold). px/image=1,048,576 = full 1024×1024 FC2
   chip (body fills FOV at 210km altitude, same as HAMO at 680km).
 
-GEOMETRY TABLES — 04_geometry_tables_dsk256_110825/ (MISSION-SCIENCE DSK)
+GEOMETRY TABLES — geometry/dsk256/ (MISSION-SCIENCE DSK)
 
 | Phase  | Parquets | Pixels          | mean_iof | f_solar | Status          |
 |--------|----------|-----------------|----------|---------|-----------------|
@@ -156,7 +156,7 @@ GEOMETRY TABLES — 04_geometry_tables_dsk256_110825/ (MISSION-SCIENCE DSK)
 | HAMO   | 1,089    | 1,141,899,264   | 0.106    | 892.0   | VERIFIED Jun 20 |
 | LAMO   | 4,349    | 4,560,257,024   | 0.082    | 892.0   | VERIFIED Jun 21 |
 
-GEOMETRY TABLES — 04_geometry_tables_ellipsoid/ (TRIAXIAL ELLIPSOID)
+GEOMETRY TABLES — geometry/ellipsoid/ (TRIAXIAL ELLIPSOID)
 
 | Phase  | Parquets | Pixels      | mean_iof_daylight | f_solar | Status          |
 |--------|----------|-------------|-------------------|---------|-----------------|
@@ -169,11 +169,11 @@ NOTE: Ellipsoid Survey: mean_iof_all=0.100, mean_iof_daylight=0.137 (iof>0.01, i
 
 === CALIBRATED IMAGES — CORRECTED INVENTORY ===
 
-data/01_calibrated_images/hamo/
+data/calibrated_raw_images/hamo/
   DOY 2011-246 to ~2012-196 (HAMO-1 epoch)
   Contains: HAMO-1 imagery + overlap with LAMO epoch
 
-data/01_calibrated_images/lamo/
+data/calibrated_raw_images/lamo/
   DOY 2011-312 to 2012-121 (Nov 2011 – May 2012)
   Contains: REAL VESTA LAMO DATA — COMPLETE (4,349 F1B images)
   NOT mislabelled — this IS the LAMO-phase data
@@ -197,7 +197,7 @@ HAMO geometry tables were built from both hamo/ + lamo/ correctly
 
 === SPICE CK COVERAGE ===
 
-Present (in data/02_spice_kernels/ and ck/ subdirectory):
+Present (in data/spice_kernels/ and ck/ subdirectory):
   - dawn_fc2_110723_120725_grv221108_v1.bc: Jul 2011 – Jul 2012
   - 283 quicklook/weekly CK segments: Sep 2007 – Jan 6 2013
 
@@ -253,7 +253,7 @@ KNOWN GAP (Jul 19 2026): 49 HAMO F1D images excluded — unrecoverable CK gap.
     Sentinel: logs/hamo_110825_geometry_complete.sentinel VERIFIED
 
 [x] HAMO all-letter (F1B-F1G) geometry grind — COMPLETE (Jul 19 2026)
-    5,498/5,547 parquets (99.1%) in 04_geometry_tables_dsk256_110825/hamo/
+    5,498/5,547 parquets (99.1%) in geometry/dsk256/hamo/
     49 F1D images excluded — unrecoverable CK gap, see SPICE CK COVERAGE
     above ("KNOWN GAP" entry). Full verification performed: sacct exit
     codes for all submission jobs, parquet-count reconciliation against
@@ -277,8 +277,8 @@ KNOWN GAP (Jul 19 2026): 49 HAMO F1D images excluded — unrecoverable CK gap.
     Survey (845 images) and LAMO (4,349 images) are already complete, so
     this grinds the remaining non-F1B filter letters (F1C through F1I)
     into the SAME committed directories
-    (04_geometry_tables_dsk256_110825/survey/ and .../lamo/), same pattern
-    as HAMO's F1B + F1B-F1G coexisting in 04_geometry_tables_dsk256_110825/hamo/.
+    (geometry/dsk256/survey/ and .../lamo/), same pattern
+    as HAMO's F1B + F1B-F1G coexisting in geometry/dsk256/hamo/.
     Downstream silver-layer builds must keep filtering F1B only (unaffected).
 
     Pilot batch COMPLETE (Jul 20 2026, jobs 26116492-26116499):
