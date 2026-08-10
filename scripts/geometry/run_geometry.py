@@ -6,7 +6,7 @@ import sys
 import pyarrow.parquet as pq
 
 # Absolute package path resolution following formal repository architecture standards
-from hapke_mcmc_package.etl.geometry_engine import GeometryEngine
+from photometry_etl.etl.geometry_engine import GeometryEngine
 
 # Thread-isolated storage reference for processing node workers
 _engine_worker = None

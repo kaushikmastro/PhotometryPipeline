@@ -12,7 +12,7 @@ SRC_DIR = PROJECT_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from hapke_mcmc_package.etl.ingestion import DataManager  # noqa: E402
+from photometry_etl.etl.ingestion import DataManager  # noqa: E402
 
 
 def configure_logging() -> None:

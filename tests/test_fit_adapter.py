@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 from astropy.io import fits
 
-from hapke_mcmc_package.etl.geometry_engine import _DetachedFitsImage, _find_label_value
+from photometry_etl.etl.geometry_engine import _DetachedFitsImage, _find_label_value
 
 STEM = "FC21B0000000_00000000000F1B"
 

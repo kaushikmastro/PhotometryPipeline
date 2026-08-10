@@ -5,7 +5,7 @@ from pathlib import Path
 import sys
 import pyarrow.parquet as pq
 
-from hapke_mcmc_package.etl.geometry_engine import GeometryEngine
+from photometry_etl.etl.geometry_engine import GeometryEngine
 
 _engine_worker = None
 
