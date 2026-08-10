@@ -208,32 +208,6 @@ class MinnaertModel(BasePhotometricModel):
         return cls(parameters=parameters, metadata=metadata, backend=backend)
 
 
-@dataclass
-class AkimovModel(BasePhotometricModel):
-    """Akimov model skeleton."""
-
-    model_name: str = "akimov"
-
-    def _reflectance_numpy(self, geometry: GeometryBatch) -> np.ndarray:
-        raise NotImplementedError
-
-    def _reflectance_torch(self, geometry: GeometryBatch) -> Any:
-        raise NotImplementedError
-
-    def parameter_names(self) -> list[str]:
-        raise NotImplementedError
-
-    def parameter_bounds(self) -> dict[str, tuple[float, float]]:
-        raise NotImplementedError
-
-    def parameter_priors(self) -> dict[str, ParameterPrior]:
-        raise NotImplementedError
-
-    @classmethod
-    def from_dict(cls, payload: Mapping[str, Any]) -> "AkimovModel":
-        raise NotImplementedError
-
-
 @ModelRegistry.register
 @dataclass
 class LunarLambertModel(BasePhotometricModel):
