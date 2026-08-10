@@ -10,7 +10,7 @@ SRC_DIR = PROJECT_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from hapke_mcmc_package.etl.ingestion import DataManager  # noqa: E402
+from photometry_etl.etl.ingestion import DataManager  # noqa: E402
 
 
 class DummyResponse:
@@ -62,7 +62,7 @@ class TestDataManager(unittest.TestCase):
         manager = DataManager(str(self.manifest), str(self.data_root))
         self.assertTrue(manager.validate_data_ready())
 
-    @patch("hapke_mcmc_package.etl.ingestion.requests.get")
+    @patch("photometry_etl.etl.ingestion.requests.get")
     def test_download_missing_data_downloads_img_and_lbl(self, mock_get):
         (self.data_root / "calibrated_raw_images" / "A.IMG").touch()
         mock_get.return_value = DummyResponse(payload=b"ok")
@@ -117,9 +117,9 @@ KERNELS_TO_LOAD = (
         self.assertTrue(manager._construct_kernel_url("fc2.ti").endswith("/ik/fc2.ti"))
         self.assertTrue(manager._construct_kernel_url("dawn.tsc").endswith("/sclk/dawn.tsc"))
 
-    @patch("hapke_mcmc_package.etl.ingestion.Path.resolve", return_value=Path("/scratch/test_data"))
-    @patch("hapke_mcmc_package.etl.ingestion.DataManager._download_file_with_retries")
-    @patch("hapke_mcmc_package.etl.ingestion.DataManager._discover_metakernel_urls")
+    @patch("photometry_etl.etl.ingestion.Path.resolve", return_value=Path("/scratch/test_data"))
+    @patch("photometry_etl.etl.ingestion.DataManager._download_file_with_retries")
+    @patch("photometry_etl.etl.ingestion.DataManager._discover_metakernel_urls")
     def test_download_spice_kernels_downloads_metakernel_and_children(
         self,
         mock_discover,
@@ -151,8 +151,8 @@ KERNELS_TO_LOAD = (
         self.assertTrue((self.data_root / "spice_kernels" / "b.bc").exists())
         self.assertTrue((self.data_root / "spice_kernels" / "c.tf").exists())
 
-    @patch("hapke_mcmc_package.etl.ingestion.time.sleep", return_value=None)
-    @patch("hapke_mcmc_package.etl.ingestion.requests.get")
+    @patch("photometry_etl.etl.ingestion.time.sleep", return_value=None)
+    @patch("photometry_etl.etl.ingestion.requests.get")
     def test_download_retries_until_success(self, mock_get, _mock_sleep):
         class RequestError(Exception):
             pass
@@ -168,9 +168,9 @@ KERNELS_TO_LOAD = (
         self.assertTrue(target.exists())
         self.assertEqual(mock_get.call_count, 3)
 
-    @patch("hapke_mcmc_package.etl.ingestion.Path.resolve", return_value=Path("/scratch/test_data"))
-    @patch("hapke_mcmc_package.etl.ingestion.DataManager._list_remote_directory_filtered")
-    @patch("hapke_mcmc_package.etl.ingestion.DataManager._download_file_with_retries")
+    @patch("photometry_etl.etl.ingestion.Path.resolve", return_value=Path("/scratch/test_data"))
+    @patch("photometry_etl.etl.ingestion.DataManager._list_remote_directory_filtered")
+    @patch("photometry_etl.etl.ingestion.DataManager._download_file_with_retries")
     def test_download_dtm_geometry_metadata_uses_exact_archive_path(
         self,
         mock_download,
@@ -206,9 +206,9 @@ KERNELS_TO_LOAD = (
             called_urls,
         )
 
-    @patch("hapke_mcmc_package.etl.ingestion.Path.resolve", return_value=Path("/scratch/test_data"))
-    @patch("hapke_mcmc_package.etl.ingestion.DataManager._list_remote_directory_filtered")
-    @patch("hapke_mcmc_package.etl.ingestion.DataManager._download_file_with_retries")
+    @patch("photometry_etl.etl.ingestion.Path.resolve", return_value=Path("/scratch/test_data"))
+    @patch("photometry_etl.etl.ingestion.DataManager._list_remote_directory_filtered")
+    @patch("photometry_etl.etl.ingestion.DataManager._download_file_with_retries")
     def test_find_and_download_dtm_removes_orphaned_img_before_crawl(
         self,
         mock_download,
@@ -238,8 +238,8 @@ KERNELS_TO_LOAD = (
         self.assertTrue(ok)
         self.assertFalse(orphan.exists())
 
-    @patch("hapke_mcmc_package.etl.ingestion.Path.resolve", return_value=Path("/scratch/test_data"))
-    @patch("hapke_mcmc_package.etl.ingestion.DataManager._download_file_with_retries")
+    @patch("photometry_etl.etl.ingestion.Path.resolve", return_value=Path("/scratch/test_data"))
+    @patch("photometry_etl.etl.ingestion.DataManager._download_file_with_retries")
     def test_find_and_download_dtm_preserves_existing_imgs_when_geometry_ready(
         self,
         mock_download,
@@ -262,9 +262,9 @@ KERNELS_TO_LOAD = (
         self.assertTrue(img.exists())
         mock_download.assert_not_called()
 
-    @patch("hapke_mcmc_package.etl.ingestion.Path.resolve", return_value=Path("/scratch/test_data"))
-    @patch("hapke_mcmc_package.etl.ingestion.DataManager._list_remote_directory_filtered")
-    @patch("hapke_mcmc_package.etl.ingestion.DataManager._download_file_with_retries")
+    @patch("photometry_etl.etl.ingestion.Path.resolve", return_value=Path("/scratch/test_data"))
+    @patch("photometry_etl.etl.ingestion.DataManager._list_remote_directory_filtered")
+    @patch("photometry_etl.etl.ingestion.DataManager._download_file_with_retries")
     def test_find_and_download_dtm_raises_when_geometry_metadata_unavailable(
         self,
         mock_download,

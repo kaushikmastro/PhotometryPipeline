@@ -2,7 +2,7 @@ import argparse
 import logging
 from pathlib import Path
 import pandas as pd
-from hapke_mcmc_package.etl.geometry_engine import GeometryEngine
+from photometry_etl.etl.geometry_engine import GeometryEngine
 
 def get_image_by_index(phase: str, index: int) -> Path:
 

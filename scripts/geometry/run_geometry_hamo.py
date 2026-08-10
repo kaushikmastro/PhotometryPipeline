@@ -20,7 +20,7 @@ from pathlib import Path
 import pyarrow.parquet as pq
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
-from hapke_mcmc_package.etl.geometry_engine import GeometryEngine
+from photometry_etl.etl.geometry_engine import GeometryEngine
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 

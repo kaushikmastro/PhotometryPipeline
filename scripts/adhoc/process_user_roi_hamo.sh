@@ -22,7 +22,7 @@ echo "Total files to process: ${#FILES[@]}"
 for name in "${FILES[@]}"; do
   echo "=== Processing $name ==="
   python -c "
-from hapke_mcmc_package.etl.geometry_engine import GeometryEngine
+from photometry_etl.etl.geometry_engine import GeometryEngine
 engine = GeometryEngine(
     data_root='/scratch/kaushim07/vesta_data',
     metakernel_path='/scratch/kaushim07/vesta_data/spice_kernels/dawn_dynamic.tm',

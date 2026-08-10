@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from hapke_mcmc_package.etl.geometry_engine import GeometryEngine
+from photometry_etl.etl.geometry_engine import GeometryEngine
 
 ROUTE = GeometryEngine._phase_subdir_from_image_path
 
