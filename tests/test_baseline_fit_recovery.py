@@ -68,3 +68,11 @@ def test_fit_recovers_known_parameters(model_cls, true_params, initial_guess) ->
     assert result.metadata["success"]
     for name, expected in true_params.items():
         assert result.fitted_parameters[name] == pytest.approx(expected, abs=0.03)
+
+    # None of these synthetic cases sit at a parameter bound, so every error must be a
+    # finite, positive number (see tests/test_least_sq_fitter.py for the degenerate cases:
+    # underdetermined fits and parameters railed at a bound both report NaN instead).
+    assert result.parameter_errors is not None
+    for name in true_params:
+        assert np.isfinite(result.parameter_errors[name])
+        assert result.parameter_errors[name] > 0.0
