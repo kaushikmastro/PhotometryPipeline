@@ -1,18 +1,30 @@
-"""Disk-integrated golden layer for the barely-resolved approach-phase F1B images.
+"""Disk-integrated golden layer for approach-phase F1B images, via aperture photometry.
 
-At ~1.2M km range Vesta subtends only ~4-5 pixels of a 1024x1024 FC2 frame. Full
-per-pixel Hapke-style geometry (GeometryEngine.compute_geometry casting ~1e6 SPICE rays
-per frame via sincpt to find ~17 on-body hits, ~3-4 min/frame -> ~35 hr for 609 frames)
-is both wasteful and the wrong tool here: Li et al. (2013) treated frames like this with
-plain APERTURE photometry, which needs only two things per frame:
-  (a) total flux over an aperture -- from the image itself
-  (b) phase angle / sub-observer / sub-solar geometry / range -- from ONE SPICE call per
-      frame, not one per pixel
+Range varies ~300x across the approach dataset (10,700 km to 1.22M km), so Vesta's
+apparent size is NOT uniform: it spans from ~4.6 px (genuinely point-like, ~1.22M km) up
+to larger than the 1024x1024 frame itself (~10,700 km, essentially a resolved disk-limb
+shot). A single fixed-radius aperture is only correct at the point-like end. Three tiers,
+by estimated target diameter (see estimate_target_diameter_px):
+  - <= FIXED_APERTURE_DIAMETER_PX: point-source regime. DEFAULT_APERTURE_RADIUS_PX is a
+    safe fixed aperture (Li et al. 2013's own approach for "Vesta smaller than the FOV"
+    frames).
+  - <= MAX_ADAPTIVE_TARGET_DIAMETER_PX: partially resolved. A fixed small aperture
+    truncates real flux here (worse the bigger the target), so photometry uses a
+    curve-of-growth: cumulative flux vs. aperture radius, radius chosen where the curve
+    plateaus (marginal flux gain consistent with background noise, not signal).
+  - above that: fully resolved (in some cases larger than the frame). Aperture
+    photometry of any radius is the wrong tool here -- these need the standard per-pixel
+    geometry pipeline (GeometryEngine.compute_geometry), same as RC/Survey/HAMO/LAMO.
+    Rows are still emitted (photometry_method="skipped_fully_resolved") for
+    auditability, with NaN photometry.
 
-This module reuses GeometryEngine's existing camera-FOV and radiometric-calibration
+Either way, this reuses GeometryEngine's existing camera-FOV and radiometric-calibration
 machinery (per-pixel solid angle depends only on the camera FOV, not on a target
 intercept; I/F conversion via calibrate_iof_data needs only Sun-target distance) without
-ever calling its per-pixel sincpt ray-tracing loop.
+ever calling its per-pixel sincpt ray-tracing loop -- avoiding ~1e6 wasted SPICE rays per
+frame to find a target occupying a tiny fraction of the pixels, in the tiers where that
+loop would be wasteful. (It is NOT wasteful in the fully-resolved tier -- that's exactly
+why those frames are routed elsewhere instead of forced through a small aperture.)
 
 RULE 1/2 (CLAUDE.md): running this for real (609 frames, SPICE + image IO) MUST go
 through srun/sbatch -- see scripts/submit/submit_approach_golden.sh.
@@ -49,6 +61,16 @@ DEFAULT_APERTURE_RADIUS_PX = 8.0
 DEFAULT_DETECTION_SIGMA = 5.0
 DEFAULT_BG_SIGMA_CLIP = 3.0
 DEFAULT_BG_MAX_ITER = 5
+
+VESTA_RADIUS_KM = 262.0
+# Tier boundaries, in estimated target diameter (px). See module docstring.
+FIXED_APERTURE_DIAMETER_PX = 2.0 * DEFAULT_APERTURE_RADIUS_PX  # 16 px
+MAX_ADAPTIVE_TARGET_DIAMETER_PX = 200.0  # generous headroom above the largest
+# partially-resolved-tier target actually observed (~80 px) while still comfortably
+# excluding the fully-resolved tier (~400-1400 px).
+GROWTH_CURVE_RADII_PX = tuple(np.arange(4.0, 140.0, 4.0))
+GROWTH_CURVE_PLATEAU_SIGMA = 2.0
+GROWTH_CURVE_PLATEAU_CONSECUTIVE = 3
 
 # Same YYDDDHHMMSS filename timestamp pattern proven in .tmp/approach_29_audit.py and
 # .tmp/approach_phase_coverage.py. Only used here as a fallback for `campaign` parsing /
@@ -142,6 +164,74 @@ def aperture_sum(image: np.ndarray, mask: np.ndarray, background_level: float) -
     return float(np.sum(image[usable] - background_level)), n_pix
 
 
+def estimate_target_diameter_px(
+    range_km: float, pixel_solid_angle_sr: float, target_radius_km: float = VESTA_RADIUS_KM
+) -> float:
+    """Rough estimate of the target's apparent diameter in pixels, used only to pick a
+    photometry method (see module docstring's three tiers) -- not a science quantity.
+
+    sqrt(pixel_solid_angle_sr) approximates one pixel's angular width (exact for a
+    square pixel; the FC2 detector window is close enough to square that this is fine
+    for tier selection). target angular diameter = 2 * target_radius_km / range_km.
+    """
+    if not np.isfinite(range_km) or range_km <= 0 or not np.isfinite(pixel_solid_angle_sr) or pixel_solid_angle_sr <= 0:
+        return float("nan")
+    pixel_angular_width_rad = np.sqrt(pixel_solid_angle_sr)
+    target_angular_diameter_rad = 2.0 * target_radius_km / range_km
+    return float(target_angular_diameter_rad / pixel_angular_width_rad)
+
+
+def curve_of_growth_radius(
+    image: np.ndarray,
+    centroid: tuple[float, float],
+    background_level: float,
+    background_sigma: float,
+    radii: tuple[float, ...] = GROWTH_CURVE_RADII_PX,
+    plateau_sigma: float = GROWTH_CURVE_PLATEAU_SIGMA,
+    consecutive: int = GROWTH_CURVE_PLATEAU_CONSECUTIVE,
+) -> float:
+    """Pick an aperture radius from a curve of growth: cumulative background-subtracted
+    flux at each radius in `radii` (ascending), stopping at the smallest radius after
+    which the marginal flux gained by `consecutive` further steps is each consistent
+    with pure background noise (|delta_flux| <= plateau_sigma * sqrt(delta_n_pix) *
+    background_sigma) rather than real additional signal.
+
+    Standard aperture-photometry practice for an extended/partially-resolved source: a
+    fixed radius either truncates real flux (too small) or adds pure noise (too big);
+    the curve of growth finds where the two trade off. Falls back to the largest radius
+    tested if the curve never plateaus within `radii` (the target is likely still
+    growing at the cap -- callers should treat that as a maxed-out, non-plateaued
+    aperture, not a confident measurement).
+    """
+    radii_sorted = np.asarray(sorted(radii), dtype=np.float64)
+    fluxes = np.empty_like(radii_sorted)
+    n_pix = np.empty_like(radii_sorted)
+    for i, r in enumerate(radii_sorted):
+        mask = aperture_mask(image.shape, centroid, r)
+        total, n = aperture_sum(image, mask, background_level)
+        fluxes[i] = total
+        n_pix[i] = n
+
+    plateau_run = 0
+    chosen_idx = len(radii_sorted) - 1
+    for i in range(1, len(radii_sorted)):
+        d_flux = fluxes[i] - fluxes[i - 1]
+        d_pix = max(n_pix[i] - n_pix[i - 1], 1.0)
+        if not np.isfinite(d_flux) or not np.isfinite(background_sigma):
+            plateau_run = 0
+            continue
+        noise = np.sqrt(d_pix) * background_sigma
+        if noise > 0 and abs(d_flux) <= plateau_sigma * noise:
+            plateau_run += 1
+            if plateau_run >= consecutive:
+                chosen_idx = i - consecutive + 1
+                break
+        else:
+            plateau_run = 0
+
+    return float(radii_sorted[chosen_idx])
+
+
 def aperture_sensitivity_term(
     image: np.ndarray,
     centroid: tuple[float, float],
@@ -204,6 +294,8 @@ class ApertureFrameResult:
     sub_solar_lat_deg: float
     sub_solar_lon_deg: float
     range_km: float
+    estimated_target_diameter_px: float
+    photometry_method: str
     centroid_row: float
     centroid_col: float
     aperture_radius_px: float
@@ -270,8 +362,13 @@ def process_frame(
     )
     phase_deg = float(np.degrees(float(illumf_result[2])))
 
-    background_level, background_sigma = estimate_background(iof)
-    centroid = locate_target(iof, background_level, background_sigma, detection_sigma)
+    # Tier selection (see module docstring): estimated from geometry alone, before any
+    # detection attempt, so a maxed-out/oversized target never gets forced through a
+    # method that can't measure it.
+    center_solid_angle_sr = float(
+        pixel_solid_angle_sr[pixel_solid_angle_sr.shape[0] // 2, pixel_solid_angle_sr.shape[1] // 2]
+    )
+    estimated_diameter_px = estimate_target_diameter_px(range_km, center_solid_angle_sr)
 
     common = dict(
         image_id=image_id, campaign=campaign, utc=utc,
@@ -280,21 +377,41 @@ def process_frame(
         sub_observer_lon_deg=float(np.degrees(lon_obs)),
         sub_solar_lat_deg=float(np.degrees(lat_sun)),
         sub_solar_lon_deg=float(np.degrees(lon_sun)),
-        range_km=range_km, aperture_radius_px=aperture_radius_px,
-        background_iof=background_level, background_iof_sigma=background_sigma,
+        range_km=range_km, estimated_target_diameter_px=estimated_diameter_px,
     )
+    not_measured = dict(
+        centroid_row=float("nan"), centroid_col=float("nan"), aperture_radius_px=float("nan"),
+        n_pix_aperture=0, background_iof=float("nan"), background_iof_sigma=float("nan"),
+        integrated_flux=float("nan"), integrated_flux_uncertainty=float("nan"),
+        integrated_iof_km2=float("nan"), integrated_iof_km2_uncertainty=float("nan"),
+        detected=False,
+    )
+
+    if not np.isfinite(estimated_diameter_px) or estimated_diameter_px > MAX_ADAPTIVE_TARGET_DIAMETER_PX:
+        # Fully resolved (sometimes larger than the frame) -- aperture photometry of any
+        # radius is the wrong tool. Leave it out of this golden layer; route it through
+        # GeometryEngine.compute_geometry instead.
+        return ApertureFrameResult(**common, photometry_method="skipped_fully_resolved", **not_measured)
+
+    background_level, background_sigma = estimate_background(iof)
+    centroid = locate_target(iof, background_level, background_sigma, detection_sigma)
 
     if centroid is None:
         return ApertureFrameResult(
-            **common, centroid_row=float("nan"), centroid_col=float("nan"),
-            n_pix_aperture=0, integrated_flux=float("nan"),
-            integrated_flux_uncertainty=float("nan"), integrated_iof_km2=float("nan"),
-            integrated_iof_km2_uncertainty=float("nan"), detected=False,
+            **common, photometry_method="no_detection",
+            **{**not_measured, "background_iof": background_level, "background_iof_sigma": background_sigma},
         )
 
-    mask = aperture_mask(iof.shape, centroid, aperture_radius_px)
+    if estimated_diameter_px <= FIXED_APERTURE_DIAMETER_PX:
+        photometry_method = "fixed_aperture"
+        radius_px = aperture_radius_px
+    else:
+        photometry_method = "adaptive_aperture"
+        radius_px = curve_of_growth_radius(iof, centroid, background_level, background_sigma)
+
+    mask = aperture_mask(iof.shape, centroid, radius_px)
     integrated_flux, n_pix = aperture_sum(iof, mask, background_level)
-    sensitivity = aperture_sensitivity_term(iof, centroid, aperture_radius_px, background_level)
+    sensitivity = aperture_sensitivity_term(iof, centroid, radius_px, background_level)
     integrated_flux_unc = aperture_uncertainty(n_pix, background_sigma, sensitivity)
 
     # Area-weighted, disk-integrated-photometry-convention quantity (projected area,
@@ -315,7 +432,10 @@ def process_frame(
     )
 
     return ApertureFrameResult(
-        **common, centroid_row=centroid[0], centroid_col=centroid[1], n_pix_aperture=n_pix,
+        **common, photometry_method=photometry_method,
+        centroid_row=centroid[0], centroid_col=centroid[1],
+        aperture_radius_px=radius_px, n_pix_aperture=n_pix,
+        background_iof=background_level, background_iof_sigma=background_sigma,
         integrated_flux=integrated_flux, integrated_flux_uncertainty=integrated_flux_unc,
         integrated_iof_km2=integrated_iof_km2, integrated_iof_km2_uncertainty=integrated_iof_km2_unc,
         detected=True,

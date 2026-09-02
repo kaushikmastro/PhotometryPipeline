@@ -24,6 +24,10 @@ aperture_sum = _module.aperture_sum
 aperture_sensitivity_term = _module.aperture_sensitivity_term
 aperture_uncertainty = _module.aperture_uncertainty
 campaign_from_file_spec = _module.campaign_from_file_spec
+estimate_target_diameter_px = _module.estimate_target_diameter_px
+curve_of_growth_radius = _module.curve_of_growth_radius
+FIXED_APERTURE_DIAMETER_PX = _module.FIXED_APERTURE_DIAMETER_PX
+MAX_ADAPTIVE_TARGET_DIAMETER_PX = _module.MAX_ADAPTIVE_TARGET_DIAMETER_PX
 
 
 def _synthetic_frame(
@@ -193,3 +197,77 @@ def test_campaign_from_file_spec_returns_none_when_no_approach_segment_present()
     # extract when the path contains no "APPROACH/<campaign>/" segment at all.
     spec = "/DATA/IMG/2011246_SURVEY/FC21B0004000_11246000000F1B.IMG"
     assert campaign_from_file_spec(spec) is None
+
+
+# ---------------------------------------------------------------------------
+# estimate_target_diameter_px
+# ---------------------------------------------------------------------------
+
+
+def test_estimate_target_diameter_px_matches_far_campaign_scale():
+    # 2011123_OPNAV_001: range ~1.2177e6 km, verified target diameter ~4.6 px
+    # (see Stage-1/2 report). FC2's per-pixel angular width from spiceypy.getfov is
+    # ~19.2 arcsec, so pixel_solid_angle_sr ~ (19.2 arcsec)^2 in steradians.
+    arcsec_to_rad = np.pi / (180.0 * 3600.0)
+    pixel_angular_width_rad = 19.2 * arcsec_to_rad
+    pixel_solid_angle_sr = pixel_angular_width_rad**2
+    diameter_px = estimate_target_diameter_px(1.2177e6, pixel_solid_angle_sr)
+    assert diameter_px == pytest.approx(4.6, rel=0.1)
+
+
+def test_estimate_target_diameter_px_scales_inversely_with_range():
+    pixel_solid_angle_sr = (19.2 * np.pi / (180.0 * 3600.0)) ** 2
+    near = estimate_target_diameter_px(1000.0, pixel_solid_angle_sr)
+    far = estimate_target_diameter_px(10000.0, pixel_solid_angle_sr)
+    assert near == pytest.approx(far * 10.0, rel=1e-6)
+
+
+def test_estimate_target_diameter_px_nan_for_invalid_inputs():
+    assert np.isnan(estimate_target_diameter_px(float("nan"), 1e-8))
+    assert np.isnan(estimate_target_diameter_px(1000.0, 0.0))
+    assert np.isnan(estimate_target_diameter_px(-1.0, 1e-8))
+
+
+def test_tier_boundaries_match_observed_dataset_scale():
+    # Point-source tier tops out ~16 px; the observed partially-resolved tier peaks
+    # ~80 px; MAX_ADAPTIVE_TARGET_DIAMETER_PX must clear that with real headroom while
+    # staying well under the observed fully-resolved tier's ~400 px floor.
+    assert FIXED_APERTURE_DIAMETER_PX == pytest.approx(16.0)
+    assert 80.0 < MAX_ADAPTIVE_TARGET_DIAMETER_PX < 400.0
+
+
+# ---------------------------------------------------------------------------
+# curve_of_growth_radius
+# ---------------------------------------------------------------------------
+
+
+def test_curve_of_growth_radius_plateaus_near_a_compact_sources_true_size():
+    image = _synthetic_frame(
+        shape=(200, 200), background=0.001, noise_sigma=1e-5,
+        target_row=100.0, target_col=100.0, target_peak=0.5, target_sigma_px=6.0,
+    )
+    level, sigma = estimate_background(image)
+    radius = curve_of_growth_radius(image, (100.0, 100.0), level, sigma)
+    # A Gaussian blob with sigma=6px has ~99% of its flux within ~3*sigma=18px;
+    # the curve of growth should settle well short of the radii array's 140px cap.
+    assert 12.0 <= radius <= 40.0
+
+
+def test_curve_of_growth_radius_falls_back_to_largest_radius_when_never_plateaus():
+    # A source that fills the whole test frame never lets the curve flatten within
+    # the radii sampled here -- falls back to the largest one tested, not a false
+    # plateau partway through.
+    image = np.full((60, 60), 0.5)
+    radii = (4.0, 8.0, 12.0, 16.0, 20.0)
+    radius = curve_of_growth_radius(image, (30.0, 30.0), background_level=0.0,
+                                     background_sigma=0.0001, radii=radii)
+    assert radius == max(radii)
+
+
+def test_curve_of_growth_radius_small_for_pure_background_frame():
+    image = np.random.default_rng(2).normal(0.001, 0.0001, size=(100, 100))
+    level, sigma = estimate_background(image)
+    radius = curve_of_growth_radius(image, (50.0, 50.0), level, sigma)
+    # No real source: the curve should plateau almost immediately, at or near the
+    # smallest radius sampled.
+    assert radius <= 12.0
