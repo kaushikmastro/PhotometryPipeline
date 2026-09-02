@@ -34,6 +34,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
 from photometry_etl.etl.geometry_engine import (  # noqa: E402
     GeometryEngine,
+    _safe_float,
     calibrate_iof_data,
     compute_pixel_solid_angles,
     compute_projected_area_km2,
@@ -196,6 +197,7 @@ class ApertureFrameResult:
     image_id: str
     campaign: str | None
     utc: str
+    exposure_duration_ms: float
     phase_deg: float
     sub_observer_lat_deg: float
     sub_observer_lon_deg: float
@@ -231,6 +233,7 @@ def process_frame(
 
     et = engine._extract_observation_et(pds_img.label)
     utc = spiceypy.et2utc(et, "ISOC", 3)
+    exposure_duration_ms = _safe_float(pds_img.label, ["EXPOSURE_DURATION"], default=float("nan"))
 
     sun_pos, _ = spiceypy.spkpos("SUN", et, "J2000", engine.aberration_correction, engine.target)
     distance_au = spiceypy.convrt(float(spiceypy.vnorm(sun_pos)), "KM", "AU")
@@ -271,7 +274,8 @@ def process_frame(
     centroid = locate_target(iof, background_level, background_sigma, detection_sigma)
 
     common = dict(
-        image_id=image_id, campaign=campaign, utc=utc, phase_deg=phase_deg,
+        image_id=image_id, campaign=campaign, utc=utc,
+        exposure_duration_ms=exposure_duration_ms, phase_deg=phase_deg,
         sub_observer_lat_deg=float(np.degrees(lat_obs)),
         sub_observer_lon_deg=float(np.degrees(lon_obs)),
         sub_solar_lat_deg=float(np.degrees(lat_sun)),
