@@ -19,6 +19,7 @@ _spec.loader.exec_module(_module)
 
 estimate_background = _module.estimate_background
 locate_target = _module.locate_target
+locate_target_in_window = _module.locate_target_in_window
 aperture_mask = _module.aperture_mask
 aperture_sum = _module.aperture_sum
 aperture_sensitivity_term = _module.aperture_sensitivity_term
@@ -26,8 +27,10 @@ aperture_uncertainty = _module.aperture_uncertainty
 campaign_from_file_spec = _module.campaign_from_file_spec
 estimate_target_diameter_px = _module.estimate_target_diameter_px
 curve_of_growth_radius = _module.curve_of_growth_radius
-FIXED_APERTURE_DIAMETER_PX = _module.FIXED_APERTURE_DIAMETER_PX
 MAX_ADAPTIVE_TARGET_DIAMETER_PX = _module.MAX_ADAPTIVE_TARGET_DIAMETER_PX
+POINTING_MARGIN_PX = _module.POINTING_MARGIN_PX
+MIN_WINDOW_RADIUS_PX = _module.MIN_WINDOW_RADIUS_PX
+APERTURE_PADDING_FACTOR = _module.APERTURE_PADDING_FACTOR
 
 
 def _synthetic_frame(
@@ -73,6 +76,45 @@ def test_estimate_background_ignores_nan_pixels():
     assert sigma == pytest.approx(0.0)
 
 
+def test_estimate_background_falls_back_to_percentile_spread_when_floor_pinned():
+    # Reproduces the real bug found via the decisive aperture-vs-per-pixel test:
+    # calibrate_iof_data clips negative-noise excursions to exactly 0.0, which pins
+    # >50% of a faint approach frame's pixels to that one value (measured 56% on a real
+    # frame). Iterative sigma-clipping around the median then collapses onto that
+    # degenerate cluster and converges to sigma=0 -- which made locate_target's
+    # threshold degenerate to exactly background_level, "detecting" and centroiding on
+    # whatever noise pixel summed highest, nowhere near the real ~17-pixel target.
+    rng = np.random.default_rng(3)
+    image = rng.normal(0.0, 1e-7, size=(200, 200))
+    image[image < 0] = 0.0  # the same floor-clip calibrate_iof_data applies
+    # ~50% in expectation for a symmetric distribution clipped at its median; a lenient
+    # >0.4 avoids the assertion being a coin-flip around exactly 0.5 while still
+    # confirming a real degenerate-majority precondition (real frames measured at 56%).
+    assert (image == 0.0).mean() > 0.4
+
+    level, sigma = estimate_background(image)
+    assert level == pytest.approx(0.0, abs=1e-12)
+    # The old code returned sigma=0.0 here (the bug); the fix must recover a small but
+    # real, positive noise scale from the percentile fallback.
+    assert sigma > 0.0
+    assert sigma < 1e-5  # sane order of magnitude for this noise level, not a fluke
+
+
+def test_estimate_background_floor_pinned_still_detects_real_faint_target():
+    # End-to-end regression for the bug: with the fix, a faint compact source should
+    # still be found correctly even when the background is floor-pinned, instead of
+    # locate_target degenerating to "detect everywhere."
+    rng = np.random.default_rng(4)
+    image = rng.normal(0.0, 1e-7, size=(200, 200))
+    image[image < 0] = 0.0
+    image[100, 100] = 0.01  # a real, unambiguous source many sigma above the noise
+    level, sigma = estimate_background(image)
+    centroid = locate_target(image, level, sigma, detection_sigma=5.0)
+    assert centroid is not None
+    assert centroid[0] == pytest.approx(100.0, abs=1.0)
+    assert centroid[1] == pytest.approx(100.0, abs=1.0)
+
+
 # ---------------------------------------------------------------------------
 # locate_target
 # ---------------------------------------------------------------------------
@@ -98,6 +140,74 @@ def test_locate_target_returns_none_when_nothing_above_threshold():
 def test_locate_target_returns_none_for_non_finite_background_sigma():
     image = _synthetic_frame()
     centroid = locate_target(image, background_level=0.0, background_sigma=float("nan"))
+    assert centroid is None
+
+
+# ---------------------------------------------------------------------------
+# locate_target_in_window -- regression coverage for the real bug (see module
+# docstring): a whole-frame search locks onto a bright unrelated feature instead of a
+# faint real target near the SPICE-predicted position. locate_target (unwindowed)
+# reproduces the failure; locate_target_in_window is the fix.
+# ---------------------------------------------------------------------------
+
+
+def _frame_with_bright_decoy_and_faint_true_target(
+    shape=(200, 200), background=0.0, noise_sigma=1e-8,
+    decoy_row=100.0, decoy_col=170.0, decoy_peak=0.05,
+    true_row=100.0, true_col=100.0, true_peak=5e-7, seed=7,
+):
+    """A bright, unrelated 'decoy' feature (standing in for the real background star
+    with a CCD-blooming streak found on real data) far from a much fainter 'true
+    target' -- the exact shape of the bug this function fixes."""
+    rng = np.random.default_rng(seed)
+    image = background + rng.normal(0.0, noise_sigma, size=shape)
+    rows, cols = np.mgrid[0 : shape[0], 0 : shape[1]]
+    decoy = decoy_peak * np.exp(-(((rows - decoy_row) ** 2 + (cols - decoy_col) ** 2) / (2 * 3.0**2)))
+    true_target = true_peak * np.exp(
+        -(((rows - true_row) ** 2 + (cols - true_col) ** 2) / (2 * 1.5**2))
+    )
+    return image + decoy + true_target
+
+
+def test_locate_target_unwindowed_reproduces_the_bug_locking_onto_the_decoy():
+    image = _frame_with_bright_decoy_and_faint_true_target()
+    level, sigma = estimate_background(image)
+    centroid = locate_target(image, level, sigma, detection_sigma=5.0)
+    assert centroid is not None
+    # Whole-frame search finds the bright decoy, not the faint true target 70px away.
+    assert centroid[1] == pytest.approx(170.0, abs=2.0)
+
+
+def test_locate_target_in_window_excludes_the_decoy_and_finds_the_true_target():
+    image = _frame_with_bright_decoy_and_faint_true_target()
+    level, sigma = estimate_background(image)
+    # Window centered on the true target's (SPICE-predicted) position, small enough to
+    # exclude the decoy at col=170 (70px away).
+    centroid = locate_target_in_window(
+        image, predicted_row=100.0, predicted_col=100.0, window_radius_px=30.0,
+        background_level=level, background_sigma=sigma, detection_sigma=3.0,
+    )
+    assert centroid is not None
+    assert centroid[0] == pytest.approx(100.0, abs=2.0)
+    assert centroid[1] == pytest.approx(100.0, abs=2.0)
+
+
+def test_locate_target_in_window_returns_none_when_window_has_no_signal():
+    image = _synthetic_frame(target_row=10.0, target_col=10.0)  # real target far outside window
+    level, sigma = estimate_background(image)
+    centroid = locate_target_in_window(
+        image, predicted_row=50.0, predicted_col=50.0, window_radius_px=10.0,
+        background_level=level, background_sigma=sigma, detection_sigma=5.0,
+    )
+    assert centroid is None
+
+
+def test_locate_target_in_window_returns_none_for_non_finite_background_sigma():
+    image = _synthetic_frame()
+    centroid = locate_target_in_window(
+        image, predicted_row=32.0, predicted_col=32.0, window_radius_px=20.0,
+        background_level=0.0, background_sigma=float("nan"),
+    )
     assert centroid is None
 
 
@@ -228,11 +338,10 @@ def test_estimate_target_diameter_px_nan_for_invalid_inputs():
     assert np.isnan(estimate_target_diameter_px(-1.0, 1e-8))
 
 
-def test_tier_boundaries_match_observed_dataset_scale():
-    # Point-source tier tops out ~16 px; the observed partially-resolved tier peaks
-    # ~80 px; MAX_ADAPTIVE_TARGET_DIAMETER_PX must clear that with real headroom while
-    # staying well under the observed fully-resolved tier's ~400 px floor.
-    assert FIXED_APERTURE_DIAMETER_PX == pytest.approx(16.0)
+def test_tier_boundary_matches_observed_dataset_scale():
+    # The observed aperture-photometry-tier target peaks ~80 px diameter;
+    # MAX_ADAPTIVE_TARGET_DIAMETER_PX must clear that with real headroom while staying
+    # well under the observed fully-resolved tier's ~400 px floor.
     assert 80.0 < MAX_ADAPTIVE_TARGET_DIAMETER_PX < 400.0
 
 
