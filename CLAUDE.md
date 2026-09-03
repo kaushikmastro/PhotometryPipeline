@@ -169,6 +169,31 @@ them). Using `disk_integrate.py` on real data requires re-running the geometry g
 the relevant images; nothing has been regenerated yet — this is a known, reported gap, not
 an oversight.
 
+### Approach-phase golden layer — commit 29c3b00's output is INVALID, do not use
+
+`scripts/golden/build_approach_disk_integrated_golden.py` produces a disk-integrated
+golden layer for approach-phase (barely-resolved) F1B images via aperture photometry
+instead of per-pixel geometry (Vesta occupies too few on-body pixels at approach range
+to justify the full sincpt ray-tracing loop). **The version committed at `29c3b00`
+("tiered aperture photometry") is invalid.** A whole-frame blind background-threshold
+search does not reliably find Vesta: on faint point-source frames the true signal sits
+at the noise floor while the background has fat non-Gaussian tails, so the
+flux-weighted centroid locks onto whichever unrelated bright feature dominates instead
+— concretely confirmed as a background star with a CCD-blooming streak, 69px from
+Vesta's true position, on a real frame. A "perfect" Spearman phase-trend and tight
+repeat-frame agreement both survived on that wrong target, because the star's
+brightness happened to also vary coherently with time — **trend-based validation
+without provenance is not validation.**
+
+Fixed at `e9f07f9` (SPICE-seeded search: predict target pixel + angular size from
+ephemeris first, restrict detection/centroiding and aperture radius to that predicted
+neighborhood — see the module's own docstring for the full mechanism and the failure
+modes it replaces). Any parquet or analysis produced by an earlier commit of this
+script should be treated as unvalidated and discarded, not reused. Validate a rebuild
+against provenance (`centroid_offset_px` small and stable; `n_pix_aperture` scaling
+with `estimated_target_diameter_px` across campaigns; aperture-vs-per-pixel agreement
+on a control frame) before trusting any phase-curve trend built from it.
+
 ## Data Provenance
 
 === DATA PROVENANCE (as of June 21, 2026) ===
