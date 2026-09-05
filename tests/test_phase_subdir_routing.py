@@ -17,6 +17,7 @@ ROUTE = GeometryEngine._phase_subdir_from_image_path
         (Path("/data/calibrated_raw_images/survey/FC21SURVEY_0001.IMG"), "survey"),
         (Path("/data/calibrated_raw_images/lamo/FC21LAMO_0001.IMG"), "lamo"),
         (Path("/data/calibrated_raw_images/rc/FC21RC_0001.IMG"), "rc"),
+        (Path("/data/calibrated_raw_images/approach/FC21B0002999_11198053046F1B.IMG"), "approach"),
         # case-insensitivity
         (Path("/data/calibrated_raw_images/HAMO/FC21HAMO_0002.IMG"), "hamo"),
     ],

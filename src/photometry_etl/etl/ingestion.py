@@ -220,7 +220,15 @@ class DataManager:
 
     @staticmethod
     def _phase_from_file_spec(file_specification_name: str) -> str | None:
-        """Map archive file path to phase subdirectory name."""
+        """Map archive file path to phase subdirectory name.
+
+        PDS files the Rotation Characterization sequences (RC1/RC2/RC3/RC3B) as
+        subdirectories of a parent campaign folder literally named *_APPROACH (e.g.
+        /DATA/IMG/2011123_APPROACH/2011181_RC1/...) -- the RC check below must run
+        BEFORE the approach check so those keep classifying as "rc", not "approach".
+        Only a path containing APPROACH that does NOT also match the RC pattern (i.e.
+        genuine pre-RC cruise/OpNav approach imaging) falls through to "approach".
+        """
         path = str(file_specification_name).upper()
         if "SURVEY" in path:
             return "survey"
@@ -230,18 +238,14 @@ class DataManager:
             return "lamo"
         if re.search(r"(^|[/_])RC[0-9A-Z]*($|[/_])", path):
             return "rc"
+        if "APPROACH" in path:
+            return "approach"
         return None
 
     @staticmethod
     def _is_target_phase_file_spec(file_specification_name: str) -> bool:
         """Return True when file path belongs to one of the requested mission phases."""
         return DataManager._phase_from_file_spec(file_specification_name) is not None
-
-    @staticmethod
-    def _is_excluded_phase_file_spec(file_specification_name: str) -> bool:
-        """Return True when file path belongs to non-survey phases to be excluded."""
-        path = str(file_specification_name).upper()
-        return any(phase in path for phase in ("APPROACH", "HAMO", "LAMO"))
 
     @staticmethod
     def _is_fc2_f1_stem(stem: str) -> bool:
@@ -671,7 +675,7 @@ class DataManager:
             raw_value = str(row.get(col, ""))
             stem = self._normalize_image_stem(raw_value)
             phase_subdir = str(row.get("phase_subdir", "")).strip().lower()
-            if phase_subdir not in {"rc", "survey", "hamo", "lamo"}:
+            if phase_subdir not in {"rc", "survey", "hamo", "lamo", "approach"}:
                 phase_subdir = self._phase_from_file_spec(str(row.get("file_specification_name", ""))) or "survey"
             if not (self.image_dir / phase_subdir / f"{stem}.IMG").exists():
                 missing_files.append(stem)
@@ -680,7 +684,7 @@ class DataManager:
     def _destination_subdir_for_row(self, row: pd.Series) -> str:
         """Resolve image destination subfolder for one manifest row."""
         phase_subdir = str(row.get("phase_subdir", "")).strip().lower()
-        if phase_subdir in {"rc", "survey", "hamo", "lamo"}:
+        if phase_subdir in {"rc", "survey", "hamo", "lamo", "approach"}:
             return phase_subdir
         phase_from_spec = self._phase_from_file_spec(str(row.get("file_specification_name", "")))
         return phase_from_spec or "survey"
@@ -728,7 +732,7 @@ class DataManager:
 
         logging.info("Found %d missing manifest files. Starting download...", len(missing_rows))
         self.image_dir.mkdir(parents=True, exist_ok=True)
-        for phase_subdir in ("rc", "survey", "hamo", "lamo"):
+        for phase_subdir in ("rc", "survey", "hamo", "lamo", "approach"):
             (self.image_dir / phase_subdir).mkdir(parents=True, exist_ok=True)
 
         for _, row in missing_rows.iterrows():

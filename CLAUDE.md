@@ -36,6 +36,14 @@ Hapke photometric model fitting on Dawn/FC Vesta Survey F1B disk-resolved data.
 Shape model: preliminary Gaskell DSK256 (f_solar=892, `04_geometry_tables_fast/`).
 HPC: Curta, conda env `photomc_env`.
 
+**Three names coexist deliberately — do not "fix" this later.** GitHub repo:
+`PhotometryPipeline` (renamed from `Hapke_mcmc`; GitHub keeps the old URL redirecting).
+Local working-directory name on Curta: `photometry_mcmc_env` (NOT renamed — 70 of 148
+files under `scripts/` hardcode this absolute path, plus a live Prefect deployment
+registered against it; renaming the directory for zero functional benefit would be a
+fourth stale-path incident this month, not a second). Installed Python package
+(`setup.cfg`): `vesta_photometry_pipeline`. All three refer to the same codebase.
+
 ## Committed Case 1 Result (preliminary DSK, illuminated regime — FULL DATA)
 
 | parameter | value | source |
@@ -121,6 +129,117 @@ CV_trend=5.13%, CV_other=8.31%, albedo r=0.810.
 `isotropic_h=False` (default) = Hapke 2002 approximation.  
 The committed Case 1 and all production fits use `isotropic_h=False`.  
 The decomposition diagnostics previously used `isotropic_h=True` with stale parameters — this has been corrected.
+
+## Disk-Integrated Photometry
+
+**Definition (this codebase, authoritative):** "disk-integrated" means the area-weighted
+SUM of reflectance over one image's illuminated+visible disk at a single epoch — the
+quantity proportional to total flux received by a distant observer. Implemented in
+`src/photometry/aggregation/disk_integrate.py` (`integrate_observed`/`integrate_modeled`),
+built on top of the existing disk-resolved `BasePhotometricModel.reflectance()` machinery
+with no new physics or separate equation — pure aggregation.
+
+This is **not** what `ARCHITECTURE_DECISIONS.md` calls "disk-integrated" elsewhere (its
+phase-angle-binned aggregation of many pixels from many different images/geometries into
+one phase bin — that's a different, legitimate operation, just a naming collision). That
+document is stale/unreliable on this specific point; this file is authoritative.
+
+**Which area column to use — a physics decision, not an implementation detail.** Weight
+by `projected_area_km2` (= `pixel_solid_angle_sr * range_km^2`, the sky-plane/foreshortened
+footprint), **not** `pixel_area_km2` (the true, unforeshortened surface area on the body,
+`.../cos(emission)`). Disk-integrated brightness is defined as total flux to a distant
+observer, which integrates over projected area — this is the convention in Li et al. 2013
+and every published disk-integrated phase curve. `pixel_area_km2` is the right quantity
+for mapping/resolution questions ("how many km² of surface does this pixel sample"), but
+using it to weight a disk integral is wrong.
+
+Verified concretely, not asserted: for a Lambertian sphere (I/F = albedo·μ₀/π), weighting
+by projected area (∝μ₀·μ, i.e. incidence×emission cosines both present) reproduces the
+classical Lambert phase function `Φ_L(α) = (1/π)[sin α + (π−α)cos α]` — specifically,
+`Σ(I/F·projected_area) = albedo·R²·(2/3)·Φ_L(α)` — to numerical precision (cross-checked
+against independent grid quadrature). Weighting by true surface area (∝μ₀ only) does
+**not** reproduce it — e.g. at α=90° the two integrals differ by ~57%. See
+`tests/test_disk_integrate.py::test_lambertian_sphere_matches_phase_function_closed_form`
+(the load-bearing correctness test for this module) and its companion
+`test_true_surface_area_weighting_does_not_match_phase_function`, which pins the negative
+result in the suite so a future refactor can't silently swap the weight back.
+
+**Geometry ETL schema (as of this decision):** `geometry_engine.compute_geometry()` now
+writes four area-related columns per pixel: `range_km`, `pixel_solid_angle_sr` (both raw
+ingredients, so either derived quantity can be recomputed/audited without re-running
+SPICE), `pixel_area_km2` (true surface area, NaN above `max_emission_for_area_deg`,
+default 89°, not clipped), and `projected_area_km2` (no singularity, use this one for
+disk integration). **All existing raw geometry parquets predate this schema change and
+lack all four columns** (`geometry/gaskell_256/`, `geometry/gaskell_256_legacy/`,
+`geometry/ellipsoid/`, `geometry/gaskell_dsk256_110825/` — on the order of 42,000 raw
+per-image files across RC/Survey/HAMO/LAMO, plus every silver/golden product derived from
+them). Using `disk_integrate.py` on real data requires re-running the geometry grind for
+the relevant images; nothing has been regenerated yet — this is a known, reported gap, not
+an oversight.
+
+### Approach-phase golden layer — commit 29c3b00's output is INVALID, do not use
+
+`scripts/golden/build_approach_disk_integrated_golden.py` produces a disk-integrated
+golden layer for approach-phase (barely-resolved) F1B images via aperture photometry
+instead of per-pixel geometry (Vesta occupies too few on-body pixels at approach range
+to justify the full sincpt ray-tracing loop). **The version committed at `29c3b00`
+("tiered aperture photometry") is invalid.** A whole-frame blind background-threshold
+search does not reliably find Vesta: on faint point-source frames the true signal sits
+at the noise floor while the background has fat non-Gaussian tails, so the
+flux-weighted centroid locks onto whichever unrelated bright feature dominates instead
+— concretely confirmed as a background star with a CCD-blooming streak, 69px from
+Vesta's true position, on a real frame. A "perfect" Spearman phase-trend and tight
+repeat-frame agreement both survived on that wrong target, because the star's
+brightness happened to also vary coherently with time — **trend-based validation
+without provenance is not validation.**
+
+Fixed at `e9f07f9` (SPICE-seeded search: predict target pixel + angular size from
+ephemeris first, restrict detection/centroiding and aperture radius to that predicted
+neighborhood — see the module's own docstring for the full mechanism and the failure
+modes it replaces). Any parquet or analysis produced by an earlier commit of this
+script should be treated as unvalidated and discarded, not reused. Validate a rebuild
+against provenance (`centroid_offset_px` small and stable; `n_pix_aperture` scaling
+with `estimated_target_diameter_px` across campaigns; aperture-vs-per-pixel agreement
+on a control frame) before trusting any phase-curve trend built from it.
+
+**Provenance re-validated after the fix** (job 26421691, real approach frames):
+`n_pix_aperture` vs. predicted target area correlation = 0.9996 across campaigns
+(20–80px predicted diameter) — confirms the aperture now genuinely scales with target
+size instead of the old bug's near-constant radius. `centroid_offset_px` is sub-4px for
+those same brighter/larger campaigns, but a real, bounded residual of 11–19px remains
+on the faintest point-source frames (2011123/2011159, 4.6–16px predicted diameter) —
+signal that close to the noise floor still has real centroiding scatter even inside a
+correctly-restricted window. Not a bug to chase further; folded into the reported
+uncertainty at `b4201e5` (`centroid_position_uncertainty_term`).
+
+**Absolute radiometric scale: UNVERIFIED. Aperture-derived I/F is relative-only —
+fit with a free scale factor, do not treat it as absolute.** Two independent controls
+were attempted and both failed to validate an absolute conversion, for two different,
+well-understood reasons — not the same bug recurring:
+- **Survey control** (job 26421691, target ~1874px, fills 44–99% of the frame): aperture
+  read **8.6x too high**. Root cause: a single whole-frame background statistic is
+  contaminated by real on-body signal once the target dominates the frame — the same
+  class of failure the original bug had, just in the background estimate instead of the
+  centroid. Does not apply to the aperture method's actual operating range (it never
+  runs above `MAX_ADAPTIVE_TARGET_DIAMETER_PX`=200px in production).
+- **Whole-disk approach cross-check** (job 26432708, 6 frames from the newly-ground
+  `2011198_OPNAV_017`/`2011199_OPNAV_018`, 397–527px, 200px cap manually overridden as a
+  diagnostic only): aperture read **1.4–2.4x too high** (mean 1.81x). Root cause: at
+  these ranges Vesta is a partially-illuminated **crescent**, not a uniform disk — the
+  true flux-weighted centroid sits genuinely off the SPICE geometric center (68–85px
+  offset, physical, not an error, confirmed by opposite-sign offsets between the two
+  campaigns), and a circular aperture sized from the geometric radius necessarily
+  integrates over dark on-body surface and off-body space beyond the illuminated
+  crescent's true extent. More clean background than Survey (ratio much closer to 1
+  than Survey's 8.6x), but the crescent-shape mismatch is a different, uncontrolled
+  confound that this test couldn't isolate from a pure calibration check.
+
+Both controls sit outside the point-source tier's actual regime (near-full-phase,
+23–42°, where crescent effects are much smaller) and neither answers the calibration
+question cleanly for it. Decision: stop pursuing absolute validation for this method;
+any fit against the aperture golden layer must include a free scale factor (per
+exposure-duration tier, given the 60x long/short-exposure discrepancy also found
+earlier), not a fixed absolute I/F conversion.
 
 ## Data Provenance
 
@@ -225,6 +344,12 @@ KNOWN GAP (Jul 19 2026): 49 HAMO F1D images excluded — unrecoverable CK gap.
   -203000 (DAWN_SPACECRAFT) coverage of this window: none exist anywhere.
   Unrecoverable with data currently on disk. Excluded from geometry
   tables; HAMO all-letter final: 5,498/5,547 (99.1%).
+
+KNOWN GAP (Aug 7 2026): data/dtm/DTM_VESTA_93M.TIF is 0 bytes (broken/empty
+  file), discovered during the 03_dtm -> dtm rename audit. The other 5 files
+  in data/dtm/ (dawn_vesta_SPG20160901.lbl/.tpc, the 3 VE_HAMO_G_*_DTM.IMG
+  rasters) are intact and load-bearing per run_ingestion.py's DTM-foundation
+  check. Not re-downloaded yet — flagged only, not chased tonight.
 
 === OPEN ITEMS ===
 
@@ -374,3 +499,24 @@ f_solar: 892.0 W/m²
   Physical check: 892/1361 = 65.5% of solar constant ✓
   Primary source: Sierks et al. 2011 (F_solar not directly
   tabulated for F1 broadband; derived via spectral integration)
+
+## Parked / revisit later
+
+Items noted but not acted on. Do not act on either without being asked.
+
+1. **Graphify** (https://github.com/Graphify-Labs/graphify) — turns a codebase into a
+   queryable knowledge graph (tree-sitter AST, local-first, integrates with Claude Code).
+   Not worth integrating while src/photometry is small and well-known to us. Revisit when
+   the pipeline grows into a community-facing product with outside contributors, or when
+   repo-recon queries ("what calls what", "is X dead code") become frequent enough to
+   justify it.
+
+2. **Lommel-Seeliger `w` railing at 1.0** — LS fits rail at the `w` upper bound for all
+   phase bins below ~45°, with `parameter_errors` correctly reporting NaN + "railed at a
+   bound" (see `fitting/least_sq.py`'s degenerate-case handling). Root cause not yet
+   investigated. Three candidate explanations to check when we get to it:
+   (a) the `/4` convention in `LommelSeeligerModel` vs. the unbounded empirical `A` fit
+       before,
+   (b) I/F normalization in the golden layer,
+   (c) LS genuinely cannot represent Vesta's low-phase brightness.
+   Previously noted in `dddafa6`.

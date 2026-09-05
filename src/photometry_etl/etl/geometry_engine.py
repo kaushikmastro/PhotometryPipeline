@@ -178,6 +178,127 @@ def calibrate_iof_data(raw_image: np.ndarray, image_id: str, distance_au: float,
     return iof_data
 
 
+def compute_pixel_rays(bounds: np.ndarray, image_shape: tuple[int, int]) -> np.ndarray:
+    """Build per-pixel camera ray unit vectors by bilinear interpolation of the 4 FOV
+    corner vectors returned by spiceypy.getfov(). Pure function of camera geometry only
+    (no target/epoch dependence), factored out of GeometryEngine._pixel_rays so it can be
+    unit-tested without a live SPICE session.
+
+    Returns an (ny, nx, 3) array of unit vectors in the camera frame.
+    """
+    bounds = np.asarray(bounds, dtype=np.float64)
+    corners = bounds.T if bounds.shape[0] == 3 else bounds
+
+    if corners.shape[0] < 4:
+        raise RuntimeError("Camera FOV does not provide rectangular bounds.")
+
+    c0, c1, c2, c3 = corners[:4]
+    ny, nx = image_shape
+    u = np.linspace(0.0, 1.0, nx, dtype=np.float64)
+    v = np.linspace(0.0, 1.0, ny, dtype=np.float64)
+
+    top = (1.0 - u)[:, None] * c0 + u[:, None] * c1
+    bottom = (1.0 - u)[:, None] * c3 + u[:, None] * c2
+
+    rays = (1.0 - v)[:, None, None] * top[None, :, :] + v[:, None, None] * bottom[None, :, :]
+    rays /= np.linalg.norm(rays, axis=2, keepdims=True)
+    return rays
+
+
+def compute_pixel_solid_angles(rays: np.ndarray) -> np.ndarray:
+    """Per-pixel solid angle (steradians) from a camera ray-direction grid.
+
+    Small-angle parallelogram approximation: at each pixel, the solid angle is the
+    magnitude of the cross product of the local one-pixel-step tangent vectors along the
+    two image axes (|d_col x d_row|). This depends only on camera geometry (the ray grid
+    from compute_pixel_rays), not on the target intercept or epoch, so it is the same for
+    every image from a given instrument/detector-window combination.
+
+    The last row and last column have no "next" neighbor to forward-difference against;
+    rather than pad with a duplicated ray (which would zero out that edge's difference and
+    understate its solid angle), they reuse the adjacent interior pixel's step vector — a
+    much closer approximation than an artificial zero, and the FOV interpolation is smooth
+    enough that neighboring pixels' angular steps do not differ meaningfully.
+
+    Returns an (ny, nx) array of solid angles in steradians.
+    """
+    rays = np.asarray(rays, dtype=np.float64)
+    ny, nx, _ = rays.shape
+    if ny < 2 or nx < 2:
+        raise ValueError("Need at least a 2x2 pixel grid to estimate per-pixel solid angle.")
+
+    d_col = np.empty_like(rays)
+    d_col[:, :-1, :] = rays[:, 1:, :] - rays[:, :-1, :]
+    d_col[:, -1, :] = d_col[:, -2, :]
+
+    d_row = np.empty_like(rays)
+    d_row[:-1, :, :] = rays[1:, :, :] - rays[:-1, :, :]
+    d_row[-1, :, :] = d_row[-2, :, :]
+
+    cross = np.cross(d_col, d_row)
+    return np.linalg.norm(cross, axis=2)
+
+
+def compute_pixel_area_km2(
+    pixel_solid_angle_sr: np.ndarray,
+    range_km: np.ndarray,
+    emission_deg: np.ndarray,
+    max_emission_for_area_deg: float,
+) -> np.ndarray:
+    """TRUE (unforeshortened) surface area per pixel on the body: solid_angle *
+    range^2 / cos(emission) — dividing by cos(emission) undoes the foreshortening that
+    solid_angle*range^2 alone gives you (see compute_projected_area_km2), recovering the
+    actual physical footprint on Vesta's surface. Useful for mapping/resolution questions
+    ("how many km^2 of surface does this pixel sample") — NOT the right weight for
+    disk-integrated photometry; see photometry.aggregation.disk_integrate's module
+    docstring for why, and use compute_projected_area_km2 for that instead.
+
+    NaN, not clipped, wherever emission_deg > max_emission_for_area_deg or either input
+    is non-finite: the projection genuinely diverges as emission -> 90 deg, so silently
+    clipping would hand downstream area-weighted aggregation a plausible-looking but
+    wrong finite number. Callers must handle NaN areas explicitly.
+
+    All three array arguments must be the same shape; returns that same shape.
+    """
+    pixel_solid_angle_sr = np.asarray(pixel_solid_angle_sr, dtype=np.float64)
+    range_km = np.asarray(range_km, dtype=np.float64)
+    emission_deg = np.asarray(emission_deg, dtype=np.float64)
+
+    area = np.full(emission_deg.shape, np.nan, dtype=np.float64)
+    computable = (
+        np.isfinite(emission_deg)
+        & (emission_deg <= max_emission_for_area_deg)
+        & np.isfinite(range_km)
+        & np.isfinite(pixel_solid_angle_sr)
+    )
+    cos_emission = np.cos(np.deg2rad(emission_deg[computable]))
+    area[computable] = (
+        pixel_solid_angle_sr[computable] * range_km[computable] ** 2 / cos_emission
+    )
+    return area
+
+
+def compute_projected_area_km2(pixel_solid_angle_sr: np.ndarray, range_km: np.ndarray) -> np.ndarray:
+    """Projected (sky-plane) area per pixel: solid_angle * range^2 — the area a flat
+    patch perpendicular to the line of sight would need to subtend the same angular size
+    at that range. This IS the foreshortened footprint of the pixel as the observer
+    actually sees it (no cos(emission) division), and is the correct integration weight
+    for disk-integrated photometry: total flux received by a distant observer is
+    proportional to sum(reflectance * projected_area), matching the standard definition
+    used in Li et al. 2013 and published disk-integrated phase curves. See
+    photometry.aggregation.disk_integrate's module docstring for the full reasoning and
+    the analytic Lambertian-sphere test that pins this down.
+
+    No singularity as emission -> 90 deg (unlike compute_pixel_area_km2): a limb pixel's
+    true surface area diverges, but its projected/foreshortened area shrinks smoothly to
+    zero, which is physically correct — a grazing-emission surface element contributes
+    ~nothing to observed flux. NaN propagates only from NaN inputs.
+    """
+    pixel_solid_angle_sr = np.asarray(pixel_solid_angle_sr, dtype=np.float64)
+    range_km = np.asarray(range_km, dtype=np.float64)
+    return pixel_solid_angle_sr * range_km**2
+
+
 class GeometryEngine:
 
     """Core SPICE-based ray-tracing engine supporting parameterized Ellipsoid and DSK structures."""
@@ -190,9 +311,17 @@ class GeometryEngine:
         output_subdir: str = "04_geometry_tables",
         body_fixed_frame: str = "IAU_VESTA",
         aberration_correction: str = "LT+S",
-        f_solar: float = 892.0 # 1473.4
+        f_solar: float = 892.0, # 1473.4
+        max_emission_for_area_deg: float = 89.0
     ):
-        """Initialize SPICE environment. Backward-compatible signature matching for standalone scripts."""
+        """Initialize SPICE environment. Backward-compatible signature matching for standalone scripts.
+
+        max_emission_for_area_deg: above this emission angle, pixel_area_km2 is emitted as
+        NaN rather than a clipped/finite value, since the projected-area formula
+        (solid_angle * range^2 / cos(emission)) diverges as emission -> 90 deg. Do not
+        change the default without updating the corresponding schema documentation in
+        compute_geometry()'s docstring.
+        """
         self.data_root = Path(data_root)
         self.spice_dir = self.data_root / "spice_kernels"
         self.output_dir = self.data_root / output_subdir
@@ -221,6 +350,7 @@ class GeometryEngine:
         self.body_fixed_frame = body_fixed_frame
         self.aberration_correction = aberration_correction
         self.f_solar = f_solar
+        self.max_emission_for_area_deg = max_emission_for_area_deg
 
         # Fail fast if DSK mode is requested but no .bds kernels are loaded in the current pool
         method_upper = self.surface_intercept_method.upper()
@@ -288,23 +418,7 @@ class GeometryEngine:
 
     def _pixel_rays(self, image_shape: tuple[int, int]) -> np.ndarray:
         """Build per-pixel camera rays by bilinear interpolation of FOV corner vectors."""
-        bounds = np.asarray(self.bounds, dtype=np.float64)
-        corners = bounds.T if bounds.shape[0] == 3 else bounds
-
-        if corners.shape[0] < 4:
-            raise RuntimeError("Camera FOV does not provide rectangular bounds.")
-
-        c0, c1, c2, c3 = corners[:4]
-        ny, nx = image_shape
-        u = np.linspace(0.0, 1.0, nx, dtype=np.float64)
-        v = np.linspace(0.0, 1.0, ny, dtype=np.float64)
-
-        top = (1.0 - u)[:, None] * c0 + u[:, None] * c1
-        bottom = (1.0 - u)[:, None] * c3 + u[:, None] * c2
-
-        rays = (1.0 - v)[:, None, None] * top[None, :, :] + v[:, None, None] * bottom[None, :, :]
-        rays /= np.linalg.norm(rays, axis=2, keepdims=True)
-        return rays
+        return compute_pixel_rays(self.bounds, image_shape)
 
     def _log_pointing_diagnostics(self, et: float, image_shape: tuple[int, int], rays: np.ndarray, image_id: str) -> None:
         """Log frame, boresight, and FOV diagnostics for one image/time (Non-fatal)."""
@@ -361,8 +475,16 @@ class GeometryEngine:
 
     @staticmethod
     def _phase_subdir_from_image_path(image_path: Path) -> str:
-        """Resolve phase output subdir from an image path; defaults to survey."""
-        phase_names = ("rc", "survey", "hamo", "lamo")
+        """Resolve phase output subdir from an image path; defaults to survey.
+
+        "approach" was added here to mirror ingestion.py's
+        DataManager._phase_from_file_spec (54bd361) -- without it, images under
+        calibrated_raw_images/approach/ silently fall through to the "survey" default
+        and their output parquets land in output_dir/survey/, contaminating that
+        baseline exactly like the known design gap already documented in CLAUDE.md's
+        OPEN ITEMS (16 unrelated images from ad-hoc test runs, same root cause).
+        """
+        phase_names = ("rc", "survey", "hamo", "lamo", "approach")
         parts_lower = [part.lower() for part in image_path.parts]
         for phase in phase_names:
             if phase in parts_lower:
@@ -370,7 +492,30 @@ class GeometryEngine:
         return "survey"
 
     def compute_geometry(self, image_file_path: str) -> pd.DataFrame:
-        """Compute incidence/emission/phase geometry for one calibrated image."""
+        """Compute incidence/emission/phase geometry for one calibrated image.
+
+        Output schema adds four area-related columns (float64, ingredients kept
+        separately from the derived values so either projection can be re-audited or
+        revised without re-running SPICE):
+          - range_km: spacecraft-to-surface-intercept distance for that pixel
+            (norm of sincpt's srfvec), km.
+          - pixel_solid_angle_sr: per-pixel angular footprint as seen from the spacecraft,
+            steradians. Depends only on camera geometry (FOV + detector window), not on
+            the target intercept, so it is identical across images from the same
+            instrument/window.
+          - pixel_area_km2: TRUE (unforeshortened) surface area on the body, km^2 —
+            pixel_solid_angle_sr * range_km^2 / cos(emission). NaN (not clipped) where
+            emission > max_emission_for_area_deg, since this diverges as emission ->
+            90 deg. Useful for mapping/resolution questions. Do NOT use this to weight a
+            disk integral — see projected_area_km2 and
+            photometry.aggregation.disk_integrate's module docstring for why.
+          - projected_area_km2: projected (sky-plane) area, km^2 — pixel_solid_angle_sr *
+            range_km^2, i.e. the same two ingredients WITHOUT dividing by cos(emission).
+            No singularity near emission=90 deg. This is the correct weight for
+            disk-integrated photometry (total flux to a distant observer is
+            proportional to sum(reflectance * projected_area_km2) — the Li et al. 2013 /
+            standard disk-integrated-phase-curve convention).
+        """
         image_path = Path(image_file_path)
         image_id = image_path.stem
         phase_subdir = self._phase_subdir_from_image_path(image_path)
@@ -418,8 +563,13 @@ class GeometryEngine:
         if iof_data.ndim != 2:
             raise ValueError(f"Expected 2D image array, got shape {image_shape}")
 
-        rays_flat = self._pixel_rays(image_shape).reshape(-1, 3)
-        self._log_pointing_diagnostics(et, image_shape, rays_flat.reshape(image_shape[0], image_shape[1], 3), image_id)
+        pixel_rays_grid = self._pixel_rays(image_shape)
+        rays_flat = pixel_rays_grid.reshape(-1, 3)
+        self._log_pointing_diagnostics(et, image_shape, pixel_rays_grid, image_id)
+
+        # Per-pixel solid angle depends only on camera geometry (the ray grid above), not
+        # on the per-pixel SPICE intercept loop below, so compute it once up front.
+        pixel_solid_angle_sr = compute_pixel_solid_angles(pixel_rays_grid).reshape(-1)
 
         n_pix = rays_flat.shape[0]
         spoints = np.full((n_pix, 3), np.nan, dtype=np.float64)
@@ -429,11 +579,12 @@ class GeometryEngine:
         emission = np.full(n_pix, np.nan, dtype=np.float64)
         latitude = np.full(n_pix, np.nan, dtype=np.float64)
         longitude = np.full(n_pix, np.nan, dtype=np.float64)
-        
+        range_km = np.full(n_pix, np.nan, dtype=np.float64)
+
         logging.info("Tracing %d rays with SPICE sincpt using method=%s...", n_pix, self.surface_intercept_method)
         for idx in range(n_pix):
             try:
-                spoint, _, _ = spiceypy.sincpt(
+                spoint, _, srfvec = spiceypy.sincpt(
                     self.surface_intercept_method, self.target, et, self.body_fixed_frame,
                     self.aberration_correction, self.observer, self.cam_frame, rays_flat[idx]
                 )
@@ -446,8 +597,11 @@ class GeometryEngine:
                         continue
                 _log_fatal_geometry_missing(f"sincpt failed for image={image_id} pixel={idx}", exc)
                 raise
-            
+
             spoints[idx] = spoint
+            # srfvec is the observer->surface-point vector sincpt already computes
+            # internally; its norm is the exact per-pixel range, previously discarded.
+            range_km[idx] = float(np.linalg.norm(srfvec))
 
             try:
                 _, lon_rad, lat_rad = spiceypy.reclat(spoint)
@@ -479,6 +633,11 @@ class GeometryEngine:
         iof_flat = iof_data.reshape(-1)
         yy, xx = np.indices(image_shape)
 
+        pixel_area_km2 = compute_pixel_area_km2(
+            pixel_solid_angle_sr, range_km, emission, self.max_emission_for_area_deg
+        )
+        projected_area_km2 = compute_projected_area_km2(pixel_solid_angle_sr, range_km)
+
         spoints_finite = np.all(np.isfinite(spoints), axis=1)
         phase_valid = np.isfinite(phase) & (phase >= 0.0) & (phase <= 180.0)
         incidence_valid = np.isfinite(incidence) & (incidence >= 0.0) & (incidence <= 180.0)
@@ -500,6 +659,13 @@ class GeometryEngine:
             "phase": phase[valid_mask].astype(np.float32),
             "latitude": latitude[valid_mask].astype(np.float32),
             "longitude": longitude[valid_mask].astype(np.float32),
+            # float64, not float32 like the columns above: these exist specifically so
+            # the projected area can be recomputed/audited later without re-running
+            # SPICE, so precision is kept rather than traded for storage compactness.
+            "range_km": range_km[valid_mask].astype(np.float64),
+            "pixel_solid_angle_sr": pixel_solid_angle_sr[valid_mask].astype(np.float64),
+            "pixel_area_km2": pixel_area_km2[valid_mask].astype(np.float64),
+            "projected_area_km2": projected_area_km2[valid_mask].astype(np.float64),
         })
 
         output_phase_dir = self.output_dir / phase_subdir
