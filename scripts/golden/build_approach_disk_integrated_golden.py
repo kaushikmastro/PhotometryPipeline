@@ -360,18 +360,58 @@ def aperture_sensitivity_term(
     return abs(sum_outer - sum_inner) / 2.0
 
 
-def aperture_uncertainty(
-    n_pix_aperture: int, background_sigma: float, aperture_sensitivity: float = 0.0
+def centroid_position_uncertainty_term(
+    image: np.ndarray,
+    centroid: tuple[float, float],
+    predicted_position: tuple[float, float],
+    aperture_radius_px: float,
+    background_level: float,
 ) -> float:
-    """Background-noise-dominated aperture photometry uncertainty.
+    """How much the aperture sum would change if it were centered on the SPICE-
+    predicted position instead of the measured centroid -- i.e. the flux-measurement
+    consequence of centroid_offset_px, not just its pixel distance.
 
-    sqrt(n_pix) * background_sigma (standard aperture-photometry shot/background-noise
-    formula) combined in quadrature with the aperture-choice sensitivity term above.
+    Load-bearing specifically for the point-source tier: the SPICE-seeded window fix
+    (see module docstring) eliminated catastrophic wrong-target mislocation, but a real,
+    bounded residual offset remains for the faintest frames (measured 11-19px on real
+    2011123/2011159 data, vs. sub-4px for brighter mid-tier campaigns) -- the signal is
+    close enough to the noise floor there that flux-weighted centroiding still has real
+    scatter even within a correctly-restricted window. Folding this term into
+    aperture_uncertainty() means that residual scatter shows up as a bigger reported
+    uncertainty on exactly the frames where it's least trustworthy, rather than being
+    silently absorbed as if the centroid were exact.
+    """
+    shape = image.shape
+    at_centroid = aperture_mask(shape, centroid, aperture_radius_px)
+    at_predicted = aperture_mask(shape, predicted_position, aperture_radius_px)
+    sum_at_centroid, _ = aperture_sum(image, at_centroid, background_level)
+    sum_at_predicted, _ = aperture_sum(image, at_predicted, background_level)
+    if not (np.isfinite(sum_at_centroid) and np.isfinite(sum_at_predicted)):
+        return 0.0
+    return abs(sum_at_centroid - sum_at_predicted)
+
+
+def aperture_uncertainty(
+    n_pix_aperture: int,
+    background_sigma: float,
+    aperture_sensitivity: float = 0.0,
+    centroid_position_sensitivity: float = 0.0,
+) -> float:
+    """Aperture photometry uncertainty, combining in quadrature:
+
+    - sqrt(n_pix) * background_sigma: standard aperture-photometry shot/background-
+      noise term.
+    - aperture_sensitivity: how much the sum moves under a plausible alternative
+      aperture RADIUS (aperture_sensitivity_term above).
+    - centroid_position_sensitivity: how much the sum moves under a plausible
+      alternative aperture POSITION -- the measured centroid vs. the SPICE prediction
+      (centroid_position_uncertainty_term above). Zero by default (unused call sites
+      keep their prior behavior unchanged); the point-source tier passes it explicitly.
     """
     if n_pix_aperture <= 0 or not np.isfinite(background_sigma):
         return float("nan")
     shot_term = np.sqrt(n_pix_aperture) * background_sigma
-    return float(np.sqrt(shot_term**2 + aperture_sensitivity**2))
+    return float(np.sqrt(shot_term**2 + aperture_sensitivity**2 + centroid_position_sensitivity**2))
 
 
 def campaign_from_file_spec(file_specification_name: str) -> str | None:
@@ -560,7 +600,12 @@ def process_frame(
     mask = aperture_mask(iof.shape, centroid, radius_px)
     integrated_flux, n_pix = aperture_sum(iof, mask, background_level)
     sensitivity = aperture_sensitivity_term(iof, centroid, radius_px, background_level)
-    integrated_flux_unc = aperture_uncertainty(n_pix, background_sigma, sensitivity)
+    centroid_sensitivity = centroid_position_uncertainty_term(
+        iof, centroid, (predicted_row, predicted_col), radius_px, background_level
+    )
+    integrated_flux_unc = aperture_uncertainty(
+        n_pix, background_sigma, sensitivity, centroid_sensitivity
+    )
 
     # Area-weighted, disk-integrated-photometry-convention quantity (projected area,
     # per CLAUDE.md's "Disk-Integrated Photometry" decision), using the single

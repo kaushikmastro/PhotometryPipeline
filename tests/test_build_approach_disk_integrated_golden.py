@@ -23,6 +23,7 @@ locate_target_in_window = _module.locate_target_in_window
 aperture_mask = _module.aperture_mask
 aperture_sum = _module.aperture_sum
 aperture_sensitivity_term = _module.aperture_sensitivity_term
+centroid_position_uncertainty_term = _module.centroid_position_uncertainty_term
 aperture_uncertainty = _module.aperture_uncertainty
 campaign_from_file_spec = _module.campaign_from_file_spec
 estimate_target_diameter_px = _module.estimate_target_diameter_px
@@ -282,6 +283,59 @@ def test_aperture_uncertainty_combines_shot_and_sensitivity_in_quadrature():
 def test_aperture_uncertainty_nan_for_zero_pixels():
     unc = aperture_uncertainty(n_pix_aperture=0, background_sigma=0.01)
     assert np.isnan(unc)
+
+
+def test_aperture_uncertainty_combines_all_three_terms_in_quadrature():
+    shot = np.sqrt(25) * 0.02
+    unc = aperture_uncertainty(
+        n_pix_aperture=25, background_sigma=0.02,
+        aperture_sensitivity=0.1, centroid_position_sensitivity=0.3,
+    )
+    assert unc == pytest.approx(np.sqrt(shot**2 + 0.1**2 + 0.3**2))
+
+
+# ---------------------------------------------------------------------------
+# centroid_position_uncertainty_term -- the point-source tier's residual centroid
+# offset (see module docstring / decisive-test record) folded into the reported
+# uncertainty rather than silently absorbed as if the centroid were exact.
+# ---------------------------------------------------------------------------
+
+
+def test_centroid_position_uncertainty_term_zero_when_positions_match():
+    image = _synthetic_frame(target_row=20.0, target_col=20.0, noise_sigma=1e-9)
+    level, _ = estimate_background(image)
+    term = centroid_position_uncertainty_term(
+        image, centroid=(20.0, 20.0), predicted_position=(20.0, 20.0),
+        aperture_radius_px=5.0, background_level=level,
+    )
+    assert term == pytest.approx(0.0, abs=1e-9)
+
+
+def test_centroid_position_uncertainty_term_positive_when_positions_differ_on_a_real_source():
+    image = _synthetic_frame(shape=(60, 60), target_row=30.0, target_col=30.0, noise_sigma=1e-9)
+    level, _ = estimate_background(image)
+    # measured centroid offset from the true/predicted position by a few pixels --
+    # exactly the residual scatter measured on real point-source data (11-19px there;
+    # a smaller offset here since the aperture must stay within this smaller frame).
+    term = centroid_position_uncertainty_term(
+        image, centroid=(32.0, 30.0), predicted_position=(30.0, 30.0),
+        aperture_radius_px=8.0, background_level=level,
+    )
+    assert term > 0.0
+
+
+def test_centroid_position_uncertainty_term_grows_with_larger_offset():
+    image = _synthetic_frame(shape=(80, 80), target_row=40.0, target_col=40.0, noise_sigma=1e-9)
+    level, _ = estimate_background(image)
+    small_offset = centroid_position_uncertainty_term(
+        image, centroid=(41.0, 40.0), predicted_position=(40.0, 40.0),
+        aperture_radius_px=8.0, background_level=level,
+    )
+    large_offset = centroid_position_uncertainty_term(
+        image, centroid=(45.0, 40.0), predicted_position=(40.0, 40.0),
+        aperture_radius_px=8.0, background_level=level,
+    )
+    assert large_offset > small_offset
 
 
 # ---------------------------------------------------------------------------
