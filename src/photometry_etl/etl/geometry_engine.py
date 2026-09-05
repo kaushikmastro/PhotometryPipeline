@@ -475,8 +475,16 @@ class GeometryEngine:
 
     @staticmethod
     def _phase_subdir_from_image_path(image_path: Path) -> str:
-        """Resolve phase output subdir from an image path; defaults to survey."""
-        phase_names = ("rc", "survey", "hamo", "lamo")
+        """Resolve phase output subdir from an image path; defaults to survey.
+
+        "approach" was added here to mirror ingestion.py's
+        DataManager._phase_from_file_spec (54bd361) -- without it, images under
+        calibrated_raw_images/approach/ silently fall through to the "survey" default
+        and their output parquets land in output_dir/survey/, contaminating that
+        baseline exactly like the known design gap already documented in CLAUDE.md's
+        OPEN ITEMS (16 unrelated images from ad-hoc test runs, same root cause).
+        """
+        phase_names = ("rc", "survey", "hamo", "lamo", "approach")
         parts_lower = [part.lower() for part in image_path.parts]
         for phase in phase_names:
             if phase in parts_lower:
