@@ -159,7 +159,7 @@ CI (`.github/workflows/python-ci.yml`) runs the fast suite on every push and on 
 
 ## Citation / contact
 
-Kaushik Mukherjee ([mukherjeekaushik107@gmail.com](mailto:mukherjeekaushik107@gmail.com)).
+Kaushik Mukherjee (kaushik.m@fu-berlin.de).
 No formal citation (paper/DOI) yet — if you use this pipeline or its results, reach out
 first. No LICENSE file is present yet; treat the code as all-rights-reserved until one is
 added.
