@@ -194,6 +194,45 @@ against provenance (`centroid_offset_px` small and stable; `n_pix_aperture` scal
 with `estimated_target_diameter_px` across campaigns; aperture-vs-per-pixel agreement
 on a control frame) before trusting any phase-curve trend built from it.
 
+**Provenance re-validated after the fix** (job 26421691, real approach frames):
+`n_pix_aperture` vs. predicted target area correlation = 0.9996 across campaigns
+(20–80px predicted diameter) — confirms the aperture now genuinely scales with target
+size instead of the old bug's near-constant radius. `centroid_offset_px` is sub-4px for
+those same brighter/larger campaigns, but a real, bounded residual of 11–19px remains
+on the faintest point-source frames (2011123/2011159, 4.6–16px predicted diameter) —
+signal that close to the noise floor still has real centroiding scatter even inside a
+correctly-restricted window. Not a bug to chase further; folded into the reported
+uncertainty at `b4201e5` (`centroid_position_uncertainty_term`).
+
+**Absolute radiometric scale: UNVERIFIED. Aperture-derived I/F is relative-only —
+fit with a free scale factor, do not treat it as absolute.** Two independent controls
+were attempted and both failed to validate an absolute conversion, for two different,
+well-understood reasons — not the same bug recurring:
+- **Survey control** (job 26421691, target ~1874px, fills 44–99% of the frame): aperture
+  read **8.6x too high**. Root cause: a single whole-frame background statistic is
+  contaminated by real on-body signal once the target dominates the frame — the same
+  class of failure the original bug had, just in the background estimate instead of the
+  centroid. Does not apply to the aperture method's actual operating range (it never
+  runs above `MAX_ADAPTIVE_TARGET_DIAMETER_PX`=200px in production).
+- **Whole-disk approach cross-check** (job 26432708, 6 frames from the newly-ground
+  `2011198_OPNAV_017`/`2011199_OPNAV_018`, 397–527px, 200px cap manually overridden as a
+  diagnostic only): aperture read **1.4–2.4x too high** (mean 1.81x). Root cause: at
+  these ranges Vesta is a partially-illuminated **crescent**, not a uniform disk — the
+  true flux-weighted centroid sits genuinely off the SPICE geometric center (68–85px
+  offset, physical, not an error, confirmed by opposite-sign offsets between the two
+  campaigns), and a circular aperture sized from the geometric radius necessarily
+  integrates over dark on-body surface and off-body space beyond the illuminated
+  crescent's true extent. More clean background than Survey (ratio much closer to 1
+  than Survey's 8.6x), but the crescent-shape mismatch is a different, uncontrolled
+  confound that this test couldn't isolate from a pure calibration check.
+
+Both controls sit outside the point-source tier's actual regime (near-full-phase,
+23–42°, where crescent effects are much smaller) and neither answers the calibration
+question cleanly for it. Decision: stop pursuing absolute validation for this method;
+any fit against the aperture golden layer must include a free scale factor (per
+exposure-duration tier, given the 60x long/short-exposure discrepancy also found
+earlier), not a fixed absolute I/F conversion.
+
 ## Data Provenance
 
 === DATA PROVENANCE (as of June 21, 2026) ===
