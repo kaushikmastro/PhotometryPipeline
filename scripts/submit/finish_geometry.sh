@@ -13,19 +13,17 @@ set -euo pipefail
 WORKDIR="/home/kaushim07/photometry_mcmc_env"
 DATA_ROOT="$WORKDIR/data"
 IMAGE_ROOT="$DATA_ROOT/calibrated_raw_images"
-OUTPUT_ROOT="$DATA_ROOT/04_geometry_tables"
+OUTPUT_ROOT="$DATA_ROOT/geometry/gaskell_256_legacy"
 LOG_DIR="$WORKDIR/logs"
 METAKERNEL_PATH="$DATA_ROOT/spice_kernels/dawn_dynamic.tm"
 TMP_MANIFEST="$LOG_DIR/finish_geometry_manifest_${SLURM_JOB_ID:-manual}.csv"
 
 mkdir -p "$LOG_DIR"
 
-if source /home/kaushim07/miniforge3/bin/activate photometry_mcmc_env 2>/dev/null; then
-    echo "Activated env: photometry_mcmc_env"
-elif source /home/kaushim07/miniforge3/bin/activate photomc_env 2>/dev/null; then
+if source /home/kaushim07/miniforge3/bin/activate photomc_env 2>/dev/null; then
     echo "Activated env: photomc_env"
 else
-    echo "ERROR: Could not activate photometry_mcmc_env or photomc_env" >&2
+    echo "ERROR: Could not activate photomc_env" >&2
     exit 10
 fi
 

@@ -1,18 +1,22 @@
-# For use with pip and virtual environments.
-# You can generate this file from your conda environment.yml using:
-# conda env export --from-history | grep -v "^prefix:" > environment.yml
-#
-# Or by running `pip freeze > requirements.txt` in an active virtual environment.
-
-# Example packages - replace with your actual dependencies
+# Runtime dependencies (mirrors setup.cfg's install_requires).
 numpy
 scipy
-pandas
-matplotlib
-emcee
-corner
+pymc
 spiceypy
+
+# Used throughout src/ and scripts/ but not yet declared in setup.cfg's
+# install_requires -- listed here so `pip install -r requirements.txt` actually
+# works for running the pipeline, not just importing photometry/photometry_etl.
+pandas
 pyarrow
 planetaryimage
 pvl
 requests
+matplotlib
+duckdb
+astropy  # lazy-imported by geometry_engine._DetachedFitsImage for .FIT image support
+
+# Test/dev tooling.
+pytest
+hypothesis
+ruff

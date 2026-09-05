@@ -12,12 +12,10 @@ set -euo pipefail
 
 mkdir -p /home/kaushim07/photometry_mcmc_env/logs
 
-if source /home/kaushim07/miniforge3/bin/activate photometry_mcmc_env 2>/dev/null; then
-    echo "Activated env: photometry_mcmc_env"
-elif source /home/kaushim07/miniforge3/bin/activate photomc_env 2>/dev/null; then
+if source /home/kaushim07/miniforge3/bin/activate photomc_env 2>/dev/null; then
     echo "Activated env: photomc_env"
 else
-    echo "ERROR: Could not activate photometry_mcmc_env or photomc_env" >&2
+    echo "ERROR: Could not activate photomc_env" >&2
     exit 10
 fi
 
