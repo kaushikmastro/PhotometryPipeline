@@ -36,6 +36,14 @@ Hapke photometric model fitting on Dawn/FC Vesta Survey F1B disk-resolved data.
 Shape model: preliminary Gaskell DSK256 (f_solar=892, `04_geometry_tables_fast/`).
 HPC: Curta, conda env `photomc_env`.
 
+**Three names coexist deliberately — do not "fix" this later.** GitHub repo:
+`PhotometryPipeline` (renamed from `Hapke_mcmc`; GitHub keeps the old URL redirecting).
+Local working-directory name on Curta: `photometry_mcmc_env` (NOT renamed — 70 of 148
+files under `scripts/` hardcode this absolute path, plus a live Prefect deployment
+registered against it; renaming the directory for zero functional benefit would be a
+fourth stale-path incident this month, not a second). Installed Python package
+(`setup.cfg`): `vesta_photometry_pipeline`. All three refer to the same codebase.
+
 ## Committed Case 1 Result (preliminary DSK, illuminated regime — FULL DATA)
 
 | parameter | value | source |
