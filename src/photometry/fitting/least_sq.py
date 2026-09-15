@@ -5,6 +5,7 @@ from scipy.optimize import least_squares
 
 from photometry.core.types import ArrayLike, GeometryBatch
 from photometry.fitting.base import FitResult, FittingStrategy
+from photometry.fitting.weighting import Weighting
 from photometry.models.base import BasePhotometricModel
 
 
@@ -16,7 +17,7 @@ class LeastSquaresFitter(FittingStrategy):
         model: BasePhotometricModel,
         geometry: GeometryBatch,
         observed_reflectance: ArrayLike,
-        weights: ArrayLike | None = None,
+        weights: Weighting | ArrayLike | None = None,
     ) -> FitResult:
 
         parameter_names = list(model.parameter_names())
@@ -50,16 +51,29 @@ class LeastSquaresFitter(FittingStrategy):
 
         observed_array = np.asarray(observed_reflectance, dtype=float).reshape(-1)
 
-        # Support three kinds of `weights` inputs:
+        # Support four kinds of `weights` inputs:
         # - None: unweighted fit
-        # - ArrayLike: direct per-observation weights
-        # - Mapping/dict with keys 'n_pixels' and 'iof_iqr': compute weights = sqrt(n_pixels) / iof_iqr
+        # - Weighting instance (src/photometry/fitting/weighting.py): the preferred
+        #   path -- .values is already 1/sigma, and .describe() is copied into
+        #   metadata["weighting"] below for provenance. No default scheme is ever
+        #   picked here; the caller must construct one explicitly (see weighting.py's
+        #   module docstring for why an implicit default would be the same silent-
+        #   understated-errors problem this module exists to fix).
+        # - ArrayLike: direct per-observation weights (pre-existing, unchanged)
+        # - Mapping/dict with keys 'n_pixels' and 'iof_iqr': compute weights =
+        #   sqrt(n_pixels) / iof_iqr (pre-existing, unchanged -- identical to
+        #   Weighting.robust_binned(), kept working as-is for backward compatibility)
 
         weights_array = None
         weight_source = None
+        weighting_provenance = None
 
         if weights is None:
             weights_array = None
+        elif isinstance(weights, Weighting):
+            weights_array = weights.values
+            weight_source = f"Weighting:{weights.scheme}"
+            weighting_provenance = weights.describe()
         else:
             # dict-like compute path
             try:
@@ -220,6 +234,10 @@ class LeastSquaresFitter(FittingStrategy):
             "active_mask": result.active_mask.tolist() if result.active_mask is not None else None,
             "weighted": bool(weights_array is not None),
             "weight_source": weight_source,
+            # Only populated when `weights` was a Weighting instance -- None for the
+            # array/dict/None forms, since there's no scheme/floor/n_obs to report
+            # for those (weight_source above still distinguishes them).
+            "weighting": weighting_provenance,
             "parameter_errors": dict(param_errors),
             "parameter_covariance": param_cov.tolist() if param_cov is not None else None,
             "reduced_chi_square": float(reduced_chi2) if reduced_chi2 is not None else None,

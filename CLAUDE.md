@@ -490,6 +490,36 @@ Production fit source: 04_geometry_tables_fast/survey/
   CV-RMSE=9.223% = √(5.125²+7.669²) exactly
   Reduced chi-square=1.31 (floor-weighted, floor=CV_other·mean_iof)
 
+  **CV-RMSE=9.223%/CV_other=7.669% above: NOT REPRODUCIBLE from the current repo.**
+  Note also this parameter set (w=0.4656, g=-0.3325, θ̄=8.38°) is not the committed
+  Case 1 fit (w=0.46993, g=-0.33688, θ̄=8.2662° -- see "Committed Case 1 Result" up
+  top), which may be part of the gap. A direct re-implementation of
+  `diag_decomp_testB.py`'s own method (fixed 10°-wide incidence bins, r=pred-obs),
+  run on the same Survey lt50 dataset (906 bins, phase<80, `survey_7x7_geometry.
+  parquet`) but WITH the committed Case 1 parameters, gives **CV_other=8.44%**, not
+  7.669%. Which script/run/parameter-set actually produced 7.669% is unknown --
+  several decomposition-script variants exist (see the parked item below) and
+  none of them stamp their output with enough provenance to trace a committed
+  number back to the run that made it. Don't trust 7.669% as a target to
+  reproduce; use the numbers below instead, which ARE reproducible (job
+  26491388, `.tmp/validate_systematic_floor.py`, same dataset, committed Case 1
+  params):
+
+  | method | floor (I/F) | CV_other-equivalent |
+  |---|---|---|
+  | `Weighting.derive_systematic_floor(residuals, group_by=incidence, n_bins=10)` | 0.013017 | 8.36% |
+  | same, n_bins=6 | 0.013073 | 8.39% |
+  | direct re-implementation of `diag_decomp_testB.py`'s own method (fixed 10°-wide bins) | 0.013149 | 8.44% |
+  | Hapke.ipynb's `0.083 * mean_iof` magic number (the constant this replaces) | 0.012930 | 8.30% |
+
+  All four agree within 1.7% of each other -- real validation that the
+  quantile-binned generalization in `Weighting.derive_systematic_floor` is a
+  faithful stand-in for the original fixed-bin method, not a different
+  quantity. **`Weighting.derive_systematic_floor(residuals, group_by=incidence)`
+  (`src/photometry/fitting/weighting.py`) is now the canonical way to get this
+  number -- the `0.083 * mean_iof` hardcoded constant in Hapke.ipynb is
+  superseded, don't add new copies of it.**
+
 DSK kernel: vesta_gaskell_256_110825.bds
   SHA-256: b9c3c81a... (48,022,528 bytes)
   Source: NAIF DAWN SPICE archive, mission-science Gaskell SPC
@@ -499,6 +529,82 @@ f_solar: 892.0 W/m²
   Physical check: 892/1361 = 65.5% of solar constant ✓
   Primary source: Sierks et al. 2011 (F_solar not directly
   tabulated for F1 broadband; derived via spectral integration)
+
+## Salvaged from ARCHITECTURE_DECISIONS.md / SPICE_FIX_SUMMARY.md (both deleted)
+
+Both files were stale/Copilot-written engineering diaries with a lot of superseded or
+already-corrected content (the file self-documents having once used a physically
+impossible f_solar=1473.4 before landing on the 892.0 value already recorded above; its
+"disk-integrated" terminology is a naming collision with this file's own definition,
+already flagged in that section). Everything below is the subset that is both still
+true (checked against current code, not assumed) and wasn't recorded anywhere else.
+
+**Why "preliminary Gaskell DSK256"**: `vesta_gaskell_256_110825.bds` (the kernel recorded
+under "VALIDATED PIPELINE STATE" above) is a Q=256 downsample of Gaskell's original Q=512
+SPC reconstruction — "DSK256" names that downsampling, not a placeholder/draft status.
+There was also a genuinely pre-Dawn preliminary shape model in earlier use
+(`vesta_gaskell_256_PRELIM_preDawn.bds`, SHA-256 `6106b2a7...`, built from Hubble/
+ground-based photometry, ~16% smaller and dated 5 months before Vesta orbit insertion) --
+identified as such by hash comparison against the NAIF archive and replaced by the
+current 110825 mission-science kernel. If a file by that PRELIM name still exists in
+`spice_kernels/`, that's why, and it should not be loaded.
+
+**GeometryEngine's dynamic-metakernel preference** (`geometry_engine.py::__init__`):
+prefers `<spice_dir>/dawn_dynamic.tm` when it exists, logging "Preferring dynamic SPICE
+metakernel"; otherwise falls back to whichever `metakernel_path` was explicitly passed
+in. `dawn_dynamic.tm` is regenerated to list every kernel currently present in
+`spice_kernels/`, so new kernel downloads take effect without a code change --
+`scripts/utils/update_spice_kernels.py` is the tool for that regeneration.
+
+**SPK filename compatibility symlink** (still present, `spice_kernels/`):
+`dawn_sc_110802-110831_110922_v1.bsp -> dawn_rec_110802-110831_110922_v1.bsp`. Some
+validation logic expects the `dawn_sc_*` naming convention for this trajectory segment;
+NAIF only hosts it as `dawn_rec_*`. This symlink bridges that gap without duplicating
+the ~GB-scale kernel data -- don't "clean it up" as a dangling/duplicate-looking link.
+
+**RC uses a wider emission cutoff than other phases**: `emission_cut=75°` for RC in
+`scripts/aggregate_mission_data.py` / `scripts/utils/aggregate_mission_data.py` (vs. the
+i<50°/e<50° domain used for the Survey Case 1 fit). Rationale: RC's empirical emission
+histogram showed strong pixel occupancy through the mid-to-high emission regime with a
+steep falloff only past 75°, so 75° retains far more scientifically usable pixels
+(~25M in the 45-75° range) than a stricter cut, while still excluding the grazing-angle
+tail where Hapke's flat-surface assumption breaks down.
+
+**Disk-function model-choice findings** (from the Lambertian/Lommel-Seeliger baseline
+work): fitting Lambertian independently per mission phase showed severe albedo drift
+(~0.50 in RC vs. ~0.30 in LAMO) and a 70% RC-vs-Survey discrepancy in the <15° opposition
+regime; applying a Lommel-Seeliger disk correction brought that discrepancy down to 2%.
+Conclusion carried forward: Lambertian geometric handling introduces fatal biases for a
+dark, airless body like Vesta, and Lommel-Seeliger (or better) is the physically
+appropriate minimum disk function -- Lambertian is retained only as a diagnostic/contrast
+baseline, not a candidate for a final result. Because RC alone captures the true
+opposition surge down to ~5° phase, it's designated the primary constraint for Hapke's
+opposition-effect parameters (B0, h); Survey (8-14°) is the next-best opposition coverage
+when RC's accompanying extreme-incidence geometry excludes a bin.
+
+**`LunarLambertModel`** (Schröder et al. 2013, Eq. 6; verified current in
+`baselines.py`): blends Lommel-Seeliger and Lambertian terms via a blending parameter
+`c_L`. Defaults to the published phase-dependent relation
+`c_L(phi) = 0.830 - 0.00722 * phi_deg` (metadata flag `phase_dependent_c_L=True`); set it
+False to expose `c_L` as a free scalar parameter instead. The flag exists specifically so
+the fitter never explores a "dead" parameter axis that has no effect on the model when
+the phase-dependent relation is in use (which produced ill-conditioned fits before this
+was fixed).
+
+**`LeastSquaresFitter`** (verified current in `fitting/least_sq.py`): `scipy.optimize.
+least_squares` with `method="trf"` (Trust Region Reflective) for its native box-constraint
+support against physical parameter bounds. Accepts optional per-bin weights; when given a
+dict with `n_pixels`/`iof_iqr` keys, computes `weights = sqrt(n_pixels) / iof_iqr` and
+records `weighted`/`weight_source` in `FitResult.metadata` so downstream code can tell
+whether/how weighting was applied. (ARCHITECTURE_DECISIONS.md also claimed a `soft_l1`
+robust loss for outlier resistance -- checked against current code and that's `linear`
+now, not `soft_l1`; not salvaged since it's no longer true.)
+
+**Convention**: all fit statistics (`parameter_errors`, `parameter_covariance`,
+`reduced_chi_square`, `boundary_hits`) belong in `FitResult.metadata`, computed once by
+`LeastSquaresFitter`. Notebooks should read these off `FitResult`, not recompute their
+own uncertainties -- keeps `FitResult` a complete, trustworthy summary regardless of
+which notebook produced it.
 
 ## Parked / revisit later
 
@@ -520,3 +626,14 @@ Items noted but not acted on. Do not act on either without being asked.
    (b) I/F normalization in the golden layer,
    (c) LS genuinely cannot represent Vesta's low-phase brightness.
    Previously noted in `dddafa6`.
+
+3. **Decomposition-script proliferation has no provenance trail** — found while chasing
+   the CV_other=7.669% figure above: `diag_decomp_testB.py`, `diag_aliasing.py`,
+   `diag_sampling_noise.py`, and `diag_rc_consistency.py` all compute some variant of the
+   CV_trend/CV_other decomposition, none stamp their output with enough information
+   (script name, git commit, dataset path, parameter set) to trace a number quoted
+   elsewhere (like CLAUDE.md's own 7.669%) back to the run that produced it. Either
+   consolidate these into one script with the domain/dataset as a parameter, or have each
+   one write its provenance alongside its numbers (e.g. a small JSON sidecar per run).
+   Same failure class as the stale `develop` branch and the dead Prefect entrypoint this
+   month: something that looks authoritative but nobody can verify or reproduce.
