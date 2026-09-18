@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-#SBATCH --job-name=validate_redesign
+#SBATCH --job-name=validate_spice_seeded_redesign
 #SBATCH --nodes=1 --ntasks=1 --cpus-per-task=2 --mem=8G
 #SBATCH --partition=main --qos=standard --time=00:30:00
-#SBATCH --output=logs/validate_redesign_%j.out --error=logs/validate_redesign_%j.err
+#SBATCH --output=logs/validate_spice_seeded_redesign_%j.out --error=logs/validate_spice_seeded_redesign_%j.err
 
 set -euo pipefail
 cd /home/kaushim07/photometry_mcmc_env
