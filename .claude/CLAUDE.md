@@ -691,3 +691,19 @@ Items noted but not acted on. Do not act on either without being asked.
    (`vesta_gaskell_256_110825.bds`) is the Q=256 downsample of it. Refitting against
    Q=512 would give a direct empirical measure of θ̄'s shape-model/mesh-resolution
    sensitivity — the obvious first item once a systematic budget is actually built.
+
+5. **Hapke model term options: phase function (HG1/HG2) and opposition (SHOE/SHOE+CBOE)**
+   — both belong as swappable terms inside `HapkeModel`, same pattern as the existing
+   H-function variant switch (`isotropic_h`: Hapke-2002 vs Li-2013 IMSA).
+   - **Double Henyey-Greenstein (HG2)**: Shepard & Helfenstein (2007) form, params
+     `b, c`, swappable with the current single-term HG (`g`). Needed for direct
+     comparability with Schröder et al. (Ceres) and Nguyen et al. 2026, who both use
+     HG2. Keep HG1 (`g`) as default for Li et al. 2013 comparability. **Sign
+     convention, pin explicitly when implemented**: Schröder uses `c < 0` =
+     backscattering. `g` and `{b, c}` are not interconvertible — don't try to derive
+     one from the other.
+   - **Coherent backscatter opposition effect (CBOE)**: switchable alongside the
+     existing SHOE (`B0`, `h`). Schröder omits it because his phase angles are far
+     from zero; ours start at ~10° (Survey) and ~23° (approach), so it's likely
+     weakly constrained for Vesta too — but it should exist as an option in the
+     architecture rather than be absent.
