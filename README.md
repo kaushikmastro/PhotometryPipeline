@@ -1,4 +1,4 @@
-# Vesta Photometry Pipeline
+# Photometry Pipeline
 
 SPICE-based geometry ingestion and Hapke/empirical photometric model fitting for Dawn
 Framing Camera (FC2) imagery of asteroid (4) Vesta. It turns raw PDS3 images into
