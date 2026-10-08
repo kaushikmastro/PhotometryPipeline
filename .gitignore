@@ -30,7 +30,7 @@ slurm-*.err
 logs/
 
 # Data / generated outputs
-data/
+/data
 output/
 
 # Scratch / one-off run output at repo root (e.g. phase_audit_results.txt) -- this
