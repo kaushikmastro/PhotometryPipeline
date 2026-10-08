@@ -611,7 +611,7 @@ NAIF only hosts it as `dawn_rec_*`. This symlink bridges that gap without duplic
 the ~GB-scale kernel data -- don't "clean it up" as a dangling/duplicate-looking link.
 
 **RC uses a wider emission cutoff than other phases**: `emission_cut=75°` for RC in
-`scripts/aggregate_mission_data.py` / `scripts/utils/aggregate_mission_data.py` (vs. the
+`scripts/utils/aggregate_mission_data.py` (vs. the
 i<50°/e<50° domain used for the Survey Case 1 fit). Rationale: RC's empirical emission
 histogram showed strong pixel occupancy through the mid-to-high emission regime with a
 steep falloff only past 75°, so 75° retains far more scientifically usable pixels
