@@ -29,7 +29,7 @@ def main() -> int:
 
     for phase in PHASES:
         config = PHASE_CONFIG[phase]
-        phase_dir = project_root / "data" / "04_geometry_tables" / phase
+        phase_dir = project_root / "data" / "geometry/gaskell_256_legacy" / phase
         parquet_files = sorted(phase_dir.glob("*.parquet")) if phase_dir.exists() else []
 
         if not phase_dir.exists():

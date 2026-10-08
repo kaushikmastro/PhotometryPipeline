@@ -1,16 +1,16 @@
 """
 Usage:
-    python scripts/extract_resolved_sample_hapke_dsk256_110825.py
+    python scripts/extract/disk_resolved_survey_gaskell_dsk256_110825.py
 
 Requirements:
     - duckdb
     - pyarrow
 
 Input parquet patterns:
-    data/geometry/dsk256/survey/*.parquet  ← f_solar=892 (CORRECT)
+    data/geometry/gaskell_dsk256_110825/survey/*.parquet  ← f_solar=892 
 
 Output parquet:
-    data/silver/dsk256/survey_dsk256_110825.parquet
+    data/silver/DR_survey_gaskell_dsk256_110825.parquet
 """
 
 from pathlib import Path
@@ -19,10 +19,10 @@ import sys
 import time
 import duckdb
 
-INPUT_GLOBS = ['data//geometry/dsk256/survey/*.parquet']
-OUTPUT_DIR = Path('data/silver/dsk256')
+INPUT_GLOBS = ['data//geometry/gaskell_dsk256_110825/survey/*.parquet']
+OUTPUT_DIR = Path('data/silver/gaskell_dsk256_110825')
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-OUTPUT_PATH = OUTPUT_DIR / 'survey_dsk256_110825.parquet'
+OUTPUT_PATH = OUTPUT_DIR / 'DR_survey_gaskell_dsk256_110825.parquet'
 
 
 def guard_against_login_node() -> None:
@@ -58,11 +58,11 @@ def main() -> None:
             latitude,
             longitude,
             'survey' AS mission_phase  
-        FROM read_parquet('data/geometry/dsk256/survey/*.parquet')
+        FROM read_parquet('data/geometry/gaskell_dsk256_110825/survey/*.parquet')
         WHERE incidence <80.0
           AND emission < 80.0
           AND iof > 0.0156 * COS(RADIANS(incidence)) -- empirical cut to remove non-physical low I/F values, tuned for DSK256
-          AND image_id LIKE '%F1B%'  -- filter cut (F1B only, no F1C/D/F)
+          AND image_id LIKE '%F1%'  -- filter cut
           
 		"""
 
@@ -71,8 +71,10 @@ def main() -> None:
     print(f'Start time: {time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(start_time))}')
 
     try:
-        copy_sql = f"COPY ({sql}) TO '{OUTPUT_PATH.as_posix()}' (FORMAT PARQUET, COMPRESSION 'ZSTD')"
+        tmp_path = OUTPUT_PATH.with_suffix(OUTPUT_PATH.suffix + '.tmp')
+        copy_sql = f"COPY ({sql}) TO '{tmp_path.as_posix()}' (FORMAT PARQUET, COMPRESSION 'ZSTD')"
         con.execute(copy_sql)
+        tmp_path.rename(OUTPUT_PATH)
     except Exception as exc:
         print(f'\nDuckDB extraction failed: {exc}', file=sys.stderr)
         raise SystemExit(1) from exc

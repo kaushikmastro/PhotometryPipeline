@@ -7,7 +7,7 @@ Requirements:
     - pyarrow
 
 Input parquet patterns:
-    data/04_geometry_tables_fast/survey/*.parquet  ← f_solar=892 (CORRECT)
+    data/geometry/gaskell_256/survey/*.parquet  ← f_solar=892 (CORRECT)
 
 Output parquet:
     data/silver/dsk256/survey_dsk256.parquet
@@ -20,7 +20,7 @@ import time
 import duckdb
 
 INPUT_GLOBS = [
-    'data/04_geometry_tables_fast/survey/*.parquet',
+    'data/geometry/gaskell_256/survey/*.parquet',
 ]
 OUTPUT_DIR = Path('data/silver/dsk256')
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -60,7 +60,7 @@ def main() -> None:
             latitude,
             longitude,
             'survey' AS mission_phase  
-        FROM read_parquet('data/04_geometry_tables_fast/survey/*.parquet')
+        FROM read_parquet('data/geometry/gaskell_256/survey/*.parquet')
         WHERE incidence < 50.0
           AND emission < 50.0
           AND iof > 0.01

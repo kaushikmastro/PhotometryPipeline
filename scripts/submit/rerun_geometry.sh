@@ -52,7 +52,7 @@ echo "[3/4] Preparing geometry computation..."
 echo "  Data root: $DATA_ROOT"
 echo "  Metakernel: dawn_dynamic.tm"
 echo "  Target images: 3 (FC21B0003931, FC21B0003932, FC21B0003933)"
-echo "  Expected output: 3 parquet files in 04_geometry_tables/"
+echo "  Expected output: 3 parquet files in geometry/gaskell_256_legacy/"
 echo ""
 
 # Step 4: Submit SLURM job

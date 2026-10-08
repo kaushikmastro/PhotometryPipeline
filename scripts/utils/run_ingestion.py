@@ -27,8 +27,8 @@ def main() -> int:
 
     manifest_path = PROJECT_ROOT / "configs" / "survey_manifest.csv"
     data_root = PROJECT_ROOT / "data"
-    dtm_dir = data_root / "03_dtm"
-    geometry_tables_dir = data_root / "04_geometry_tables"
+    dtm_dir = data_root / "dtm"
+    geometry_tables_dir = data_root / "geometry/gaskell_256_legacy"
 
     if not manifest_path.exists():
         logging.error("Manifest not found: %s", manifest_path)

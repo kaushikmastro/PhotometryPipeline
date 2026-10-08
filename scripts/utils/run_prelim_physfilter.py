@@ -8,7 +8,7 @@ Config A (headline): iof>0.01 brightness cut + i_mean<50, e_mean<50, n>=10
 Config B (honest):   incidence<90 pixel-level + i_mean<50, e_mean<50, n>=10, NO iof cut
   Includes shadow-contaminated bins. Used to confirm 1% result (~26%).
 
-Input:  data/04_geometry_tables_fast/survey/*F1B*.parquet  (~682M pixels)
+Input:  data/geometry/gaskell_256/survey/*F1B*.parquet  (~682M pixels)
 Outputs:
   data/silver/dsk256/binned_prelim_iof001.parquet    (Config A)
   data/silver/dsk256/binned_prelim_physfilter.parquet (Config B)
@@ -26,7 +26,7 @@ if "login" in hostname:
     print(f"ERROR: run on compute node ({hostname})", file=sys.stderr)
     sys.exit(1)
 
-INPUT_GLOB = str(ROOT / "data" / "04_geometry_tables_fast" / "survey" / "*F1B*.parquet")
+INPUT_GLOB = str(ROOT / "data" / "geometry/gaskell_256" / "survey" / "*F1B*.parquet")
 OUT_A = SILVER / "binned_prelim_iof001.parquet"       # headline filter
 OUT_B = SILVER / "binned_prelim_physfilter.parquet"   # no iof cut
 

@@ -1,16 +1,16 @@
 """
 Usage:
-    python scripts/extract_resolved_sample_hapke_dsk256_110825.py
+    python scripts/extract/disk_resolved_lamo_gaskell_dsk256_110825.py
 
 Requirements:
     - duckdb
     - pyarrow
 
 Input parquet patterns:
-    data/geometry/dsk256/lamo/*.parquet  ← f_solar=892 (CORRECT)
+    data/geometry/gaskell_dsk256_110825/lamo/*.parquet  ← f_solar=892 
 
 Output parquet:
-    data/silver/dsk256/lamo_dsk256_110825.parquet
+    data/silver/DR_lamo_gaskell_dsk256_110825.parquet
 """
 
 from pathlib import Path
@@ -19,10 +19,10 @@ import sys
 import time
 import duckdb
 
-INPUT_GLOBS = ['data//geometry/dsk256/lamo/*.parquet']
-OUTPUT_DIR = Path('data/silver/dsk256')
+INPUT_GLOBS = ['data//geometry/gaskell_dsk256_110825/lamo/*.parquet']
+OUTPUT_DIR = Path('data/silver/gaskell_dsk256_110825')
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-OUTPUT_PATH = OUTPUT_DIR / 'lamo_dsk256_110825.parquet'
+OUTPUT_PATH = OUTPUT_DIR / 'DR_lamo_gaskell_dsk256_110825.parquet'
 
 
 def guard_against_login_node() -> None:
@@ -30,7 +30,7 @@ def guard_against_login_node() -> None:
     if 'login' in hostname or hostname == 'login.curta.zedat.fu-berlin.de':
         print('============================================================', file=sys.stderr)
         print(f'WARNING: refusing to run on shared login node: {hostname}', file=sys.stderr)
-        print('Submit this script "$ srun --nodes=1 --ntasks=1 --cpus-per-task=16 --mem=32G --partition=main --qos=standard --time=08:00:00 --pty bash" to a compute node or batch job instead.', file=sys.stderr)
+        print('Submit this script "$ srun --nodes=1 --ntasks=1 --cpus-per-task=8 --mem=28G --partition=main --qos=standard --time=08:00:00 --pty bash" to a compute node or batch job instead.', file=sys.stderr)
         print('============================================================', file=sys.stderr)
         sys.exit(1)
 
@@ -39,10 +39,10 @@ def main() -> None:
     guard_against_login_node()
 
     # 1. Connect to DuckDB and set strict SLURM resource boundaries
-    con = duckdb.connect()
-    con.execute("SET memory_limit='16GB'")
-    con.execute("SET threads=8")
-    con.execute("SET temp_directory='/scratch/kaushim07/duckdb_tmp'")  # spill to disk, not just RAM
+    con = duckdb.connect(database=':memory:')
+    con.execute("PRAGMA enable_progress_bar;")
+    con.execute("PRAGMA threads=8;") # Match your SLURM --cpus-per-task
+    con.execute("PRAGMA memory_limit='28GB';") # Leave 2GB overhead for the OS/Python
     
     # 2. Optimized SQL with injected mission_phase
     sql = """
@@ -58,11 +58,11 @@ def main() -> None:
             latitude,
             longitude,
             'lamo' AS mission_phase  
-        FROM read_parquet('data/geometry/dsk256/lamo/*.parquet')
+        FROM read_parquet('data/geometry/gaskell_dsk256_110825/lamo/*.parquet')
         WHERE incidence <80.0
           AND emission < 80.0
           AND iof > 0.0156 * COS(RADIANS(incidence)) -- empirical cut to remove non-physical low I/F values, tuned for DSK256
-          AND image_id LIKE '%F1B%'  -- filter cut (F1B only, no F1C/D/F)
+          AND image_id LIKE '%F1%'  -- filter cut
           
 		"""
 
@@ -71,8 +71,10 @@ def main() -> None:
     print(f'Start time: {time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(start_time))}')
 
     try:
-        copy_sql = f"COPY ({sql}) TO '{OUTPUT_PATH.as_posix()}' (FORMAT PARQUET, COMPRESSION 'ZSTD')"
+        tmp_path = OUTPUT_PATH.with_suffix(OUTPUT_PATH.suffix + '.tmp')
+        copy_sql = f"COPY ({sql}) TO '{tmp_path.as_posix()}' (FORMAT PARQUET, COMPRESSION 'ZSTD')"
         con.execute(copy_sql)
+        tmp_path.rename(OUTPUT_PATH)
     except Exception as exc:
         print(f'\nDuckDB extraction failed: {exc}', file=sys.stderr)
         raise SystemExit(1) from exc

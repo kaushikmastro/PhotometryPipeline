@@ -55,7 +55,7 @@ echo "Running post-job validation ..."
 python -c "
 import duckdb, pathlib, sys
 
-lamo_dir = '/scratch/kaushim07/vesta_data/04_geometry_tables_fast/lamo'
+lamo_dir = '/scratch/kaushim07/vesta_data/geometry/gaskell_256/lamo'
 parquets = list(pathlib.Path(lamo_dir).glob('*.parquet'))
 if not parquets:
     print('VALIDATION FAILED: no parquet files written to', lamo_dir)
