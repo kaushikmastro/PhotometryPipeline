@@ -33,7 +33,28 @@ logs/
 data/
 output/
 
-# Ad-hoc / one-off diagnostic and debugging scripts (preserved on disk, not tracked)
+# Scratch / one-off run output at repo root (e.g. phase_audit_results.txt) -- this
+# class of file is scratch by convention, not a committed data product.
+/*_results.txt
+
+# Session scratchpad (diagnostic scripts, one-off CSVs/PNGs) -- explicitly scratch
+# per this project's own tooling conventions, not meant to be tracked.
+.tmp/
+
+# Ad-hoc / one-off diagnostic and debugging scripts (preserved on disk, not tracked).
+#
+# HARD RULE: any script whose output is cited as a committed result anywhere (a
+# "Committed Case N Result" table in CLAUDE.md, a number in a paper/abstract, a
+# regression test's expected value) MUST NOT live here -- track it under scripts/
+# proper instead, even if it was written as a one-off. This rule exists because
+# scripts/run_baseline_fit.py did exactly that: it produced the committed Case 1
+# numbers (w=0.46993, g=-0.33688, theta_bar=8.2662, job 25799987, Jun 2026), was
+# never tracked (almost certainly swept into this directory during the Aug 2026
+# scripts/ reorg, then later deleted from disk during ad-hoc cleanup), and by the
+# time anyone went looking for it (Sep 2026) there was no git history to recover it
+# from -- the call site importing it (scripts/utils/run_prelim_physfilter.py) still
+# references it, but the file itself is gone for good. See scripts/fit_case1.py for
+# the reconstruction and docs/weighting_usage.md for the open questions it left.
 scripts/adhoc/
 
 # Local SPICE / metakernels
@@ -47,3 +68,10 @@ scripts/adhoc/
 .idea/
 *.swp
 *.swo
+
+# logs and generated outputs (not tracked)
+*.log
+outputs/
+results/
+results_tif/
+recovered_code.txt
