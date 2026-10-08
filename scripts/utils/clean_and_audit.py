@@ -18,8 +18,8 @@ def _fmt_pct(value: float) -> str:
 
 def main() -> int:
     project_root = Path(__file__).resolve().parents[2]
-    parquet_glob = project_root / "data" / "04_geometry_tables" / "*" / "*.parquet"
-    parquet_files = sorted(project_root.glob("data/04_geometry_tables/*/*.parquet"))
+    parquet_glob = project_root / "data" / "geometry/gaskell_256_legacy" / "*" / "*.parquet"
+    parquet_files = sorted(project_root.glob("data/geometry/gaskell_256_legacy/*/*.parquet"))
 
     print("Phase 2 preflight: corrupted parquet sweep")
     print(f"Parquet source: {parquet_glob}")

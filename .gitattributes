@@ -1,0 +1,9 @@
+# Notebooks carry embedded base64 plot output that byte-outweighs every .py file
+# combined, so GitHub's language bar reports this repo as "Jupyter Notebook" -- keep
+# them visible and tracked (committed outputs are the evidence a reader wants to see),
+# just excluded from the language stat.
+*.ipynb linguist-documentation
+
+# The single largest tracked file in the repo (~15MB, bigger than all notebooks
+# combined) -- an ETL-synced PDS archive manifest, not hand-authored source.
+configs/survey_manifest.csv linguist-generated

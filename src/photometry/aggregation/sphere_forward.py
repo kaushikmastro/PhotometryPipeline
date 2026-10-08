@@ -114,6 +114,7 @@ def sphere_forward_integrate(
     max_incidence_deg: float = DEFAULT_MAX_INCIDENCE_DEG,
     max_emission_deg: float = DEFAULT_MAX_EMISSION_DEG,
 ) -> SpherePhaseCurve:
+    
     """Predict a model's disk-integrated reflectance at each given phase angle by
     forward-integrating it over a synthetic illuminated sphere -- no real image data
     involved. radius_km is required (not defaulted) since this is generic, body-agnostic
@@ -124,6 +125,7 @@ def sphere_forward_integrate(
     (HapkeModel, LommelSeeligerModel, MinnaertModel, LambertianModel, future models) via
     integrate_modeled()'s reflectance() interface -- no model-specific branching here.
     """
+    
     phase_deg_array = np.asarray(phase_deg, dtype=np.float64).reshape(-1)
 
     integrated_values = np.empty_like(phase_deg_array)

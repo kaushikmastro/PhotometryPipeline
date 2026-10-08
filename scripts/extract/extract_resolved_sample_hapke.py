@@ -11,8 +11,8 @@ Requirements:
 	- pyarrow
 
 Input parquet patterns:
-	data/04_geometry_tables/rc/*.parquet
-	data/04_geometry_tables/survey/*.parquet
+	data/geometry/gaskell_256_legacy/rc/*.parquet
+	data/geometry/gaskell_256_legacy/survey/*.parquet
 
 Output parquet:
 	data/06_silver_layer/combined_rc_survey_sample.parquet
@@ -27,8 +27,8 @@ import duckdb
 import pandas as pd
 
 INPUT_GLOBS = [
-	'data/04_geometry_tables/rc/*.parquet',
-	'data/04_geometry_tables/survey/*.parquet',
+	'data/geometry/gaskell_256_legacy/rc/*.parquet',
+	'data/geometry/gaskell_256_legacy/survey/*.parquet',
 ]
 OUTPUT_DIR = Path('data/06_silver_layer')
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)

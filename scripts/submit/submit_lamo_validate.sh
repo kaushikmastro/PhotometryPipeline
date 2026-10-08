@@ -12,13 +12,13 @@ conda activate photomc_env
 
 export OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1
 
-LAMO="/scratch/kaushim07/vesta_data/04_geometry_tables_fast/lamo/*.parquet"
+LAMO="/scratch/kaushim07/vesta_data/geometry/gaskell_256/lamo/*.parquet"
 mkdir -p /scratch/kaushim07/duckdb_tmp
 
 python3 - << 'PYEOF'
 import duckdb, os
 
-LAMO = "/scratch/kaushim07/vesta_data/04_geometry_tables_fast/lamo/*.parquet"
+LAMO = "/scratch/kaushim07/vesta_data/geometry/gaskell_256/lamo/*.parquet"
 os.makedirs("/scratch/kaushim07/duckdb_tmp", exist_ok=True)
 con = duckdb.connect()
 con.execute("SET memory_limit='28GB'; SET temp_directory='/scratch/kaushim07/duckdb_tmp'; SET threads=4;")

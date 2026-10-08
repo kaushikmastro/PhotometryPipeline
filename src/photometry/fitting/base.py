@@ -31,6 +31,8 @@ class FitResult:
     # - "reduced_chi_square": float (reduced chi-square of the fit)
     # - "boundary_hits": dict[str, bool] (which parameters hit bounds)
     # - "error_estimation_warning": str | None (why a parameter_errors entry is NaN, if any)
+    # - "weighting": dict | None (Weighting.describe() when `weights` was a Weighting
+    #   instance -- see photometry.fitting.weighting -- else None)
 
 
 @dataclass

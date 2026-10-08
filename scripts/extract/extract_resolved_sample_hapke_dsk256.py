@@ -11,8 +11,8 @@ Requirements:
 	- pyarrow
 
 Input parquet patterns:
-	data/04_geometry_tables_fast/rc/*.parquet      ← f_solar=892 (CORRECT)
-	data/04_geometry_tables_fast/survey/*.parquet  ← f_solar=892 (CORRECT)
+	data/geometry/gaskell_256/rc/*.parquet      ← f_solar=892 (CORRECT)
+	data/geometry/gaskell_256/survey/*.parquet  ← f_solar=892 (CORRECT)
 
 Output parquet:
 	data/silver/dsk256/combined_rc_survey_sample_dsk256.parquet
@@ -27,8 +27,8 @@ import duckdb
 import pandas as pd
 
 INPUT_GLOBS = [
-	'data/04_geometry_tables_fast/rc/*.parquet',
-	'data/04_geometry_tables_fast/survey/*.parquet',
+	'data/geometry/gaskell_256/rc/*.parquet',
+	'data/geometry/gaskell_256/survey/*.parquet',
 ]
 OUTPUT_DIR = Path('data/silver/dsk256')
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -66,7 +66,7 @@ def main() -> None:
         SELECT 
             image_id, pixel_x, pixel_y, iof, 
             incidence, emission, phase, latitude, longitude 
-        FROM read_parquet('data/04_geometry_tables_fast/rc/*.parquet')
+        FROM read_parquet('data/geometry/gaskell_256/rc/*.parquet')
         WHERE incidence < 80.0 AND emission < 80.0 AND iof > 0.01
         USING SAMPLE 1% (bernoulli)
     ),
@@ -74,7 +74,7 @@ def main() -> None:
         SELECT 
             image_id, pixel_x, pixel_y, iof, 
             incidence, emission, phase, latitude, longitude 
-        FROM read_parquet('data/04_geometry_tables_fast/survey/*.parquet')
+        FROM read_parquet('data/geometry/gaskell_256/survey/*.parquet')
         WHERE incidence < 80.0 AND emission < 80.0 AND iof > 0.01
         USING SAMPLE 1% (bernoulli)
     ),

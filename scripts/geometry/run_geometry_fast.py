@@ -43,7 +43,7 @@ def main():
     args = parser.parse_args()
 
     # Isolate this run completely to avoid filesystem race conditions
-    output_subdir = "04_geometry_tables_fast"
+    output_subdir = "geometry/gaskell_256"
     target_output_root = Path(args.data_root) / output_subdir
     target_output_root.mkdir(parents=True, exist_ok=True)
 

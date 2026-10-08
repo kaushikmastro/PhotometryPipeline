@@ -9,7 +9,7 @@ CONTROLLED means: identical treatment on both shape models —
   - ONLY variable: which .bds file was loaded when the geometry was computed
 
 Sources:
-  Preliminary DSK: data/04_geometry_tables_fast/survey/*F1B*.parquet  (f_solar=892)
+  Preliminary DSK: data/geometry/gaskell_256/survey/*F1B*.parquet  (f_solar=892)
   110825 DSK:      data/geometry/dsk256/survey/*.parquet  (f_solar=892)
 
 Outputs:
@@ -38,7 +38,7 @@ if "login" in hostname:
     print(f"ERROR: refusing to run on login node ({hostname}).", file=sys.stderr)
     sys.exit(1)
 
-PRELIM_GLOB = str(ROOT / "data" / "04_geometry_tables_fast" / "survey" / "*F1B*.parquet")
+PRELIM_GLOB = str(ROOT / "data" / "geometry/gaskell_256" / "survey" / "*F1B*.parquet")
 D110_GLOB   = str(ROOT / "data" / "geometry/dsk256" / "survey" / "*.parquet")
 
 PRELIM_OUT  = SILVER / "binned_prelim_1pct.parquet"

@@ -15,9 +15,19 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 
 # CANONICAL SCHEMA TARGET REQUIREMENTS
 REQUIRED_COLUMNS = {
-    "image_id", "pixel_x", "pixel_y", "iof", 
+    "image_id", "pixel_x", "pixel_y", "iof",
     "incidence", "emission", "phase", "latitude", "longitude"
 }
+
+# Area columns added to geometry_engine.compute_geometry() (range_km,
+# pixel_solid_angle_sr, pixel_area_km2, projected_area_km2). NOT folded into
+# REQUIRED_COLUMNS by default: every existing committed geometry/gaskell_dsk256_110825/
+# and geometry/dsk256/ parquet (Survey/HAMO/LAMO, ~20k+ files) predates this schema and
+# lacks these columns. Silently requiring them here would make every one of those files
+# look "incomplete" to discover_worklist() and trigger an unintended full re-grind on
+# the next run against those phases. Pass --require-area-columns to opt in for a run
+# that specifically targets new-schema output (e.g. the RC grind).
+AREA_COLUMNS = {"range_km", "pixel_solid_angle_sr", "pixel_area_km2", "projected_area_km2"}
 
 # EXPLICIT TOPOGRAPHY MODE MAPPING
 SURFACE_METHOD_MAPPING = {
@@ -40,7 +50,9 @@ def _init_worker(data_root: str, metakernel_path: str, mode: str, output_subdir:
     )
 
 
-def discover_worklist(input_images: list[Path], target_output_root: Path) -> list[str]:
+def discover_worklist(
+    input_images: list[Path], target_output_root: Path, required_columns: set[str] = REQUIRED_COLUMNS
+) -> list[str]:
     """Given candidate images and the output root, return the subset that still
     needs geometry computed: skip images with an existing, schema-valid,
     readable parquet; re-queue anything missing, corrupted, truncated, or
@@ -63,7 +75,7 @@ def discover_worklist(input_images: list[Path], target_output_root: Path) -> lis
                 meta = pq.read_metadata(expected_parquet)
                 existing_columns = set(meta.schema.names)
 
-                if REQUIRED_COLUMNS.issubset(existing_columns):
+                if required_columns.issubset(existing_columns):
                     # Native PyArrow slice read forces page evaluation without loading full tables into RAM
                     pq.read_table(expected_parquet, columns=["image_id"]).slice(0, 1)
                     continue
@@ -133,7 +145,20 @@ def main():
              "restrict this run to. Still subject to the same skip-check as a full scan. "
              "If omitted, all *.IMG files under data-root are scanned (existing behavior)."
     )
+    parser.add_argument(
+        "--require-area-columns",
+        dest="require_area_columns",
+        action="store_true",
+        help="Also require range_km/pixel_solid_angle_sr/pixel_area_km2/projected_area_km2 "
+             "when deciding whether an existing parquet is already complete. Default off: "
+             "every existing committed geometry parquet predates these columns, so turning "
+             "this on unconditionally would make discover_worklist() treat all of them as "
+             "incomplete and trigger an unintended full re-grind. Opt in only for a run "
+             "that specifically targets new-schema output."
+    )
     args = parser.parse_args()
+
+    required_columns = REQUIRED_COLUMNS | AREA_COLUMNS if args.require_area_columns else REQUIRED_COLUMNS
 
     target_output_root = Path(args.data_root) / args.output_subdir
     target_output_root.mkdir(parents=True, exist_ok=True)
@@ -149,7 +174,8 @@ def main():
         # Scans the calibrated data repository path exclusively to avoid tracing raw instrument inputs
         input_images = sorted(list(Path(args.data_root).glob("calibrated_raw_images/**/*.IMG")))
 
-    worklist = discover_worklist(input_images, target_output_root)
+    logging.info("Schema completeness check requires area columns: %s", args.require_area_columns)
+    worklist = discover_worklist(input_images, target_output_root, required_columns)
 
     logging.info("Discovery audit complete. Total calibrated images located: %d. Active items passed to processing queue: %d",
                  len(input_images), len(worklist))

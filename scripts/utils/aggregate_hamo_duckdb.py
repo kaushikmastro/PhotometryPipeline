@@ -6,7 +6,7 @@ import duckdb
 
 def main():
     project_root = Path(__file__).resolve().parents[2]
-    hamo_glob = str(project_root / "data" / "04_geometry_tables" / "hamo" / "*.parquet")
+    hamo_glob = str(project_root / "data" / "geometry/gaskell_256_legacy" / "hamo" / "*.parquet")
     output_path = str(project_root / "data" / "05_aggregated" / "hamo_phase_curve.csv")
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
 

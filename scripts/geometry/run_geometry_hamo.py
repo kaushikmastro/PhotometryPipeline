@@ -2,7 +2,7 @@
 HAMO F1B geometry grind — preliminary Gaskell DSK256, f_solar=892.
 
 Processes only HAMO F1B images (clear filter, disk-resolved).
-Writes to data/04_geometry_tables_fast/hamo/ — same directory tree as
+Writes to data/geometry/gaskell_256/hamo/ — same directory tree as
 the Survey and RC tables already there.
 
 Metakernel (dawn_dynamic.tm) must reference the correct DSK before
@@ -26,7 +26,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 
 DATA_ROOT      = Path("/scratch/kaushim07/vesta_data")
 METAKERNEL     = DATA_ROOT / "spice_kernels" / "dawn_dynamic.tm"
-OUTPUT_SUBDIR  = "04_geometry_tables_fast"
+OUTPUT_SUBDIR  = "geometry/gaskell_256"
 SURFACE_METHOD = "DSK/UNPRIORITIZED"
 F_SOLAR        = 892.0
 N_WORKERS      = int(os.environ.get("SLURM_CPUS_PER_TASK", 8))
