@@ -75,3 +75,9 @@ outputs/
 results/
 results_tif/
 recovered_code.txt
+
+# local notes (kept on disk, not in the repo)
+ARCHITECTURE_DECISIONS.md
+SPICE_FIX_SUMMARY.md
+phase_audit_results.txt
+/CLAUDE.md
