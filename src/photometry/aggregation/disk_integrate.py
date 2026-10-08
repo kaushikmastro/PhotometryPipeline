@@ -99,11 +99,13 @@ def _disk_selection_mask(
     max_incidence_deg: float,
     max_emission_deg: float,
 ) -> np.ndarray:
+    
     """Illuminated+visible pixel mask: finite incidence/emission (on-body; geometry
     tables already drop off-body pixels upstream, but a caller-assembled GeometryBatch
     might not have) and within the given cutoffs. GeometryBatch angles are radians
     (its documented contract); cutoffs are accepted in degrees to match every other
     domain cutoff in this codebase (e.g. the committed Case 1 i<50,e<50 methodology)."""
+
     incidence_deg = np.rad2deg(_to_numpy(geometry.incidence))
     emission_deg = np.rad2deg(_to_numpy(geometry.emission))
 
@@ -122,6 +124,7 @@ def _weighted_sum(
     max_incidence_deg: float,
     max_emission_deg: float,
 ) -> DiskIntegrationResult:
+    
     reflectance = np.asarray(reflectance, dtype=np.float64).reshape(-1)
     areas = _to_numpy(projected_area_km2).astype(np.float64).reshape(-1)
 
@@ -168,6 +171,7 @@ def integrate_observed(
     max_incidence_deg: float = DEFAULT_MAX_INCIDENCE_DEG,
     max_emission_deg: float = DEFAULT_MAX_EMISSION_DEG,
 ) -> DiskIntegrationResult:
+    
     """Area-weighted sum of OBSERVED I/F over one image's illuminated+visible pixels.
 
     max_incidence_deg / max_emission_deg default to 90 deg -- the literal physical
@@ -192,6 +196,7 @@ def integrate_modeled(
     max_incidence_deg: float = DEFAULT_MAX_INCIDENCE_DEG,
     max_emission_deg: float = DEFAULT_MAX_EMISSION_DEG,
 ) -> DiskIntegrationResult:
+    
     """Area-weighted sum of MODEL-PREDICTED reflectance over one image's illuminated+
     visible pixels. Model-agnostic: works identically for any BasePhotometricModel
     subclass (LommelSeeligerModel, MinnaertModel, LambertianModel, HapkeModel, and any
@@ -201,6 +206,7 @@ def integrate_modeled(
     invisible geometry), then the same disk-selection + area-weighted-sum logic as
     integrate_observed is applied on top.
     """
+    
     predicted = _to_numpy(model.reflectance(geometry))
     return _weighted_sum(
         predicted, geometry, projected_area_km2, max_incidence_deg, max_emission_deg

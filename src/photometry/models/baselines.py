@@ -60,24 +60,33 @@ class LambertianModel(BasePhotometricModel):
         return self._albedo() * np.clip(mu0, 0.0, None) / np.pi
 
     def _reflectance_torch(self, geometry: GeometryBatch) -> Any:
+
         """PyTorch reflectance kernel for the Lambertian baseline."""
+
         if torch is None:
             raise RuntimeError("PyTorch is not available in this environment.")
+        
         incidence = geometry.incidence if isinstance(geometry.incidence, torch.Tensor) else torch.as_tensor(geometry.incidence)
         mu0 = torch.cos(incidence.to(dtype=torch.float64))
+
         return torch.clamp(mu0, min=0.0) * (self._albedo() / np.pi)
 
     def predict_with_uncertainty(self, geometry: GeometryBatch, parameter_samples: Any, sample_axis: int = 0, return_summary: bool = True):
+
         """Baseline uncertainty propagation via batched Lambertian evaluation."""
+
         raise NotImplementedError("LambertianModel uncertainty propagation is not implemented yet.")
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> "LambertianModel":
+
         """Reconstruct a LambertianModel from serialized state."""
+
         backend_value = payload.get("backend", Backend.AUTO.value)
         backend = Backend(backend_value)
         parameters = dict(payload.get("parameters", {}))
         metadata = dict(payload.get("metadata", {}))
+
         return cls(parameters=parameters, metadata=metadata, backend=backend)
 
 
@@ -85,6 +94,7 @@ class LambertianModel(BasePhotometricModel):
 @ModelRegistry.register
 @dataclass
 class LommelSeeligerModel(BasePhotometricModel):
+
     """Lommel-Seeliger baseline photometric model."""
 
     model_name: str = "lommel_seeliger"
@@ -111,25 +121,35 @@ class LommelSeeligerModel(BasePhotometricModel):
         return float(self.parameters.get("w", 1.0))
 
     def _reflectance_numpy(self, geometry: GeometryBatch) -> np.ndarray:
+
         incidence = np.asarray(geometry.incidence, dtype=np.float64)
         emission = np.asarray(geometry.emission, dtype=np.float64)
+
         mu0 = np.clip(np.cos(incidence), 0.0, None)
         mu = np.clip(np.cos(emission), 0.0, None)
+
         denominator = mu0 + mu
         reflectance = (self._w() / 4.0) * (mu0 / (denominator + 1e-10))
+
         return np.where(denominator > 1e-12, reflectance, 0.0)
 
     def _reflectance_torch(self, geometry: GeometryBatch) -> Any:
+
         if torch is None:
+
             raise RuntimeError("PyTorch is not available in this environment.")
+        
         incidence = geometry.incidence if isinstance(geometry.incidence, torch.Tensor) else torch.as_tensor(geometry.incidence)
         emission = geometry.emission if isinstance(geometry.emission, torch.Tensor) else torch.as_tensor(geometry.emission)
         incidence = incidence.to(dtype=torch.float64)
         emission = emission.to(dtype=torch.float64)
+
         mu0 = torch.clamp(torch.cos(incidence), min=0.0)
         mu = torch.clamp(torch.cos(emission), min=0.0)
+
         denominator = mu0 + mu
         reflectance = (self._w() / 4.0) * (mu0 / (denominator + 1e-10))
+
         return torch.where(denominator > 1e-12, reflectance, torch.zeros_like(reflectance))
 
     def predict_with_uncertainty(self, geometry: GeometryBatch, parameter_samples: Any, sample_axis: int = 0, return_summary: bool = True):
@@ -137,14 +157,19 @@ class LommelSeeligerModel(BasePhotometricModel):
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> "LommelSeeligerModel":
+        
         backend_value = payload.get("backend", Backend.AUTO.value)
         backend = Backend(backend_value)
         parameters = dict(payload.get("parameters", {}))
         metadata = dict(payload.get("metadata", {}))
+
         return cls(parameters=parameters, metadata=metadata, backend=backend)
+
+
 @ModelRegistry.register
 @dataclass
 class MinnaertModel(BasePhotometricModel):
+
     """Empirical Minnaert disk-function model."""
 
     model_name: str = "minnaert"
@@ -180,6 +205,7 @@ class MinnaertModel(BasePhotometricModel):
 
         k = self._k()
         mu_safe = mu + 1e-10
+
         return self._albedo() * (mu0**k) * (mu_safe ** (k - 1.0))
 
     def _reflectance_torch(self, geometry: GeometryBatch) -> Any:
@@ -197,14 +223,17 @@ class MinnaertModel(BasePhotometricModel):
 
         k = self._k()
         mu_safe = mu + 1e-10
+
         return self._albedo() * torch.pow(mu0, k) * torch.pow(mu_safe, (k - 1.0))
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> "MinnaertModel":
+
         backend_value = payload.get("backend", Backend.AUTO.value)
         backend = Backend(backend_value)
         parameters = dict(payload.get("parameters", {}))
         metadata = dict(payload.get("metadata", {}))
+
         return cls(parameters=parameters, metadata=metadata, backend=backend)
 
 
@@ -343,4 +372,7 @@ class LunarLambertModel(BasePhotometricModel):
         parameters = dict(payload.get("parameters", {}))
         metadata = dict(payload.get("metadata", {}))
         return cls(parameters=parameters, metadata=metadata, backend=backend)
+
+
+        
 
