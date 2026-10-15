@@ -129,8 +129,11 @@ def build_sql(input_path: Path, args) -> str:
         AVG(emission)     AS mean_emission,
         AVG(phase)        AS mean_phase,
         AVG(iof)          AS mean_iof,
-        QUANTILE_CONT(iof, 0.75) - QUANTILE_CONT(iof,0.25) AS iqr_iof,
         STDDEV_SAMP(iof)  AS std_iof,
+        QUANTILE_CONT(iof, 0.25) AS q25_iof,
+        QUANTILE_CONT(iof, 0.75) AS q75_iof,
+        QUANTILE_CONT(iof, 0.75) - QUANTILE_CONT(iof,0.25) AS iqr_iof,
+        MEDIAN(iof)       AS median_iof,
         COUNT(*)          AS n_pixels
  
     FROM read_parquet('{input_path.as_posix()}')
