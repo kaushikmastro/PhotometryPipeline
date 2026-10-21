@@ -44,7 +44,93 @@ registered against it; renaming the directory for zero functional benefit would 
 fourth stale-path incident this month, not a second). Installed Python package
 (`setup.cfg`): `vesta_photometry_pipeline`. All three refer to the same codebase.
 
-## Committed Case 1 Result (preliminary DSK, illuminated regime — FULL DATA)
+## CRITICAL: pixel-geometry bugs (Oct 2026)
+
+**Every geometry product ground before the fix on branch `fix/pixel-ray-orientation`
+(commit `a94b0cb`; pre-fix state tagged `pre-mirror-fix` = `295b834`) pairs each pixel's
+I/F with the wrong geometry, and every number derived from those products is
+invalid until regenerated.** Two independent bugs, both in
+`src/photometry_etl/etl/geometry_engine.py`:
+
+**1. X-mirror (`compute_pixel_rays`).** The old code bilinearly interpolated the four
+`spiceypy.getfov()` boundary vectors assuming c0=top-left (row 0, col 0), c1=top-right.
+For DAWN_FC2 (`dawn_fc_v02.ti`, `FOV_CLASS_SPEC='ANGLES'`, REF=+X) `getfov` returns
+c0=(+X,+Y), c1=(−X,+Y), c2=(−X,−Y), c3=(+X,−Y), while the IK ("Pixel (0,0) is in the
+lower left corner", +X right, +Y down) puts sample 0 at −X and line 0 at +Y. So column 0
+looked toward +X: each image's I/F carries the geometry of pixel (1023 − x, y). Rows
+were correct. Evidence: FC21B0006203_11236015531F1B corr(iof, Lommel-Seeliger) = −0.26
+as ground, +0.45 after `np.fliplr(iof)`, craters align only after the flip;
+FC21B0006719_11241181536F1C x-profile corr −0.61 → +0.89; getfov order and IK
+convention confirmed independently outside Curta with NAIF's kernel. It affects
+**every image**, independent of phase, version letter (F1B–F1I are product versions,
+all F1 clear) or reader path (all Survey/LAMO raw files are `.IMG` via
+`PDS3Image.open`). `CORRECT` labels in `outputs/diagnostics/xmirror_classification.csv`
+are classifier misses (close-ups / weak incidence gradients), not unaffected images.
+The approach golden layer's `predict_target_pixel` used the same ray grid, so its
+SPICE-seeded target column was mirrored too.
+
+**2. Exposure time (`_extract_observation_et`).** PDS labels give
+`EXPOSURE_DURATION = 10.000 <millisecond>`; pvl 1.3.2 parses that as
+`Quantity(value=10.0, units='millisecond')` and `float()` returns `10.0`, which was then
+used as seconds. Mid-exposure ET was 0.5 × exposure_ms **seconds** late (4.995 s for a
+10 ms frame). Pointing shift per image: see `/scratch/$USER/mirror_audit/pinhole_truth.csv`
+(job 26687237).
+
+**Fix (`a94b0cb`).** Rays come from the IK pinhole model with an explicit convention,
+and the grid is checked against `getfov` corners by sign (raises on mismatch);
+`exposure_duration_seconds()` reads the unit and rejects unitless values.
+
+| quantity | convention after the fix |
+|---|---|
+| array row / column | PDS line / sample, exactly as `PDS3Image.open` returns the image |
+| camera x | `(col − CCD_CENTER[0]) · IFOV[0]` — column 0 is −X |
+| camera y | `(CCD_CENTER[1] − row) · IFOV[1]` — row 0 is +Y |
+| boresight | +Z; ray = normalize(x, y, 1); distortion not modelled |
+| `getfov` corners | (+X,+Y), (−X,+Y), (−X,−Y), (+X,−Y) — matched by sign, never by order |
+| ET | SCLK start + 0.5 × EXPOSURE_DURATION converted to seconds |
+
+**INVALIDATED (regenerate before any use):** every per-pixel geometry product —
+`geometry/gaskell_dsk256_110825/` (Survey, HAMO, LAMO, RC, approach),
+`geometry/gaskell_256/`, `geometry/gaskell_256_legacy/`, `geometry/ellipsoid/`,
+`geometry/dsk256/`, `04_geometry_tables_fast/`; every silver parquet (`silver/dsk256/*`,
+`silver/gaskell_dsk256_110825/DR_*`); every golden cube in `data/golden/`, including
+`approach_disk_integrated_f1b.parquet`; every fit and diagnostic built on them — the
+committed Case 1 and Config B numbers, all CV_trend/CV_other decompositions, albedo
+heterogeneity and spatial residual maps, disk-integrated phase curves, HAMO/LAMO QGIS
+photometric corrections, the approach aperture validation, and the pending MCMC.
+
+**RETRACTED claims** (wrong independently of the geometry bug):
+- *r = 0.81 between CV_other and within-bin I/F spread* — from
+  `diag_albedo_heterogeneity.py` Step 3, job 25757092 (2026-06-01). It is
+  corr(std/mean, (max−min)/mean) of observed I/F over 990 bins: no model and no CV_other
+  are involved, and both axes share the 1/mean factor (absolute corr(std, max−min) =
+  +0.33). The corrected per-bin |r_other| vs IQR is ≈ 0 absolute and +0.13…+0.23
+  relative. See `scripts/diagnostics/residual_decomposition.py`.
+- *"5× resampling: only 22% of the expected noise reduction"* — from
+  `diag_sampling_noise.py` "Test A", job 25752165 (2026-05-31). It compared the 47,271-pixel
+  `survey_7x7_geometry.parquet` with the 33.5M-pixel 5% sample (386×, not 5×), with different
+  data and fitted parameters on each side, and assumed CV_other is pure bin-mean sampling
+  noise (measured std/√n: 3.5% and 0.35%).
+- *CV_RMSE 9.22% = CV_trend 5.1% ⊕ CV_other 7.7%* — appears in no job output, notebook or
+  history; first seen in this file at commit `9d113ac` (2026-08-03). Untraceable.
+
+**Regeneration plan** (needs approval; nothing regenerated yet): pilot one image
+(FC21B0006203…F1B, done on the branch into `/scratch/$USER/mirror_audit/pilot/`), then
+regrind `gaskell_dsk256_110825` (≈17.5k images, ≈16–17 h at ≈1,050 img/h with 8×14-CPU
+jobs) and, if Case 1 is to be kept on the same shape model, `gaskell_256` (≈7k images,
+≈7 h); rebuild silver → golden; refit Case 1/2/3 and rerun diagnostics. Do not overwrite
+old products in place until the new ones validate; keep the tag for comparison.
+
+**Validation rule for any new or regenerated geometry:** before use, the image must pass
+(1) corr(iof, LS) > 0 with no flip, (2) limb/shadow mask IoU as-is ≥ x-flipped, and
+(3) sub-spacecraft / sub-solar pixels from direct SPICE projection agree with the
+parquet's minimum-emission pixel and incidence gradient. `pytest --run-slow
+tests/test_geometry_engine.py` pins (1) on FC21B0006203…F1B.
+
+## Committed Case 1 Result (preliminary DSK, illuminated regime — FULL DATA) — PRE-FIX, INVALIDATED
+
+**Computed on x-mirrored, ET-shifted geometry (see CRITICAL section above). Kept for
+comparison only; do not quote until refit on regenerated geometry.**
 
 | parameter | value | source |
 |---|---|---|
@@ -57,7 +143,8 @@ fourth stale-path incident this month, not a second). Installed Python package
 | H-function | Hapke-2002 (default, `isotropic_h=False`) | `run_prelim_physfilter.py` |
 | B0, h | 1.03, 0.04 | fixed |
 
-**These are the paper numbers. Do not change without explicit re-fitting.**
+~~**These are the paper numbers. Do not change without explicit re-fitting.**~~
+Pre-fix values; they will be replaced by the refit on regenerated geometry.
 
 ### Superseded 1% Sample Result (archived, do not use downstream)
 
@@ -103,7 +190,7 @@ The `iof > 0.01` pre-filter applied in `extract_resolved_sample_hapke_dsk256.py`
 - **Mean iof of dark pixels**: 0.00076 — consistent with shadow, not dark albedo.
 - **Incidence distribution of dark pixels**: mean 55.5° but mean of dark pixels IN the fit domain (i<50°,e<50°) = 37.3° — these are topographic cast shadows inside moderate-incidence bins, not high-incidence penumbra.
 
-**Correct framing**: "Case 1 achieves 10.902% fRMS on the illuminated Survey F1B regime (iof>0.01, i<50°, e<50°, 950 bins). Including shadow-contaminated bins inflates fRMS to ~25% without changing fitted parameters' physical validity."
+**Correct framing** (pre-fix numbers — see CRITICAL section): "Case 1 achieves 10.902% fRMS on the illuminated Survey F1B regime (iof>0.01, i<50°, e<50°, 950 bins). Including shadow-contaminated bins inflates fRMS to ~25% without changing fitted parameters' physical validity."
 
 Without the shadow filter (full data): fRMS=24.975%, theta_bar=3.592°, w=0.3806 (from `prelim_physfilter_25799987.out`, Config B, 949 bins).
 
@@ -127,14 +214,15 @@ All four diagnostic scripts use the **full-data committed parameters and Hapke-2
 - `diag_resolution_diskfn.py` — 18m vs 7x7 disk-function comparison
 
 **Last confirmed run** (job 25799983, theta_bar=5.496 — STALE, superseded):  
-CV_trend=5.13%, CV_other=8.31%, albedo r=0.810.
+CV_trend=5.13%, CV_other=8.31%, ~~albedo r=0.810~~ (r=0.81 RETRACTED — see CRITICAL
+section; all decomposition numbers are pre-fix).
 
 **Pending re-run** with full-data params (job 25801546, theta_bar=8.2662):  
 `submit_decomp_fulldata.sh` submitted. Will update values once complete.
 
 ## Completed Results
 
-- Job 25799987: full-data Case 1 fit — **headline result confirmed**. Config A fRMS=10.902%, theta_bar=8.2662°. Config B fRMS=24.975%.
+- Job 25799987: full-data Case 1 fit — headline result (PRE-FIX, invalidated by the pixel-geometry bugs). Config A fRMS=10.902%, theta_bar=8.2662°. Config B fRMS=24.975%.
 - Job 25799983: decomposition at theta_bar=5.496 — **superseded** by job 25801546.
 
 ## Key Scripts
@@ -511,7 +599,7 @@ KNOWN GAP (Aug 7 2026): data/dtm/DTM_VESTA_93M.TIF is 0 bytes (broken/empty
 Production fit source: 04_geometry_tables_fast/survey/
   F1B only, 845 contributing images, f_solar=892
   Committed parameters: w=0.4656, g=-0.3325, θ̄=8.38°
-  CV-RMSE=9.223% = √(5.125²+7.669²) exactly
+  ~~CV-RMSE=9.223% = √(5.125²+7.669²) exactly~~ RETRACTED — untraceable (CRITICAL section)
   Reduced chi-square=1.31 (floor-weighted, floor=CV_other·mean_iof)
 
   **`04_geometry_tables_fast/` no longer exists under that name (confirmed via `find`,

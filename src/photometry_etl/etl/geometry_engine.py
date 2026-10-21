@@ -178,31 +178,72 @@ def calibrate_iof_data(raw_image: np.ndarray, image_id: str, distance_au: float,
     return iof_data
 
 
-def compute_pixel_rays(bounds: np.ndarray, image_shape: tuple[int, int]) -> np.ndarray:
-    """Build per-pixel camera ray unit vectors by bilinear interpolation of the 4 FOV
-    corner vectors returned by spiceypy.getfov(). Pure function of camera geometry only
-    (no target/epoch dependence), factored out of GeometryEngine._pixel_rays so it can be
-    unit-tested without a live SPICE session.
+def compute_pixel_rays(
+    image_shape: tuple[int, int],
+    ccd_center: tuple[float, float],
+    ifov: tuple[float, float],
+) -> np.ndarray:
+    """Build per-pixel camera ray unit vectors from the instrument kernel's pinhole model.
+
+    Axis convention (dawn_fc_v02.ti, "Apparent FOV Layout": pixel (0,0) is the lower-left
+    corner, +X points toward increasing sample, +Y toward decreasing line), with array
+    row index == PDS line and column index == PDS sample, exactly as PDS3Image.open
+    returns the image:
+
+        x = (col - CCD_CENTER[0]) * IFOV[0]     -> col 0 is -X
+        y = (CCD_CENTER[1] - row) * IFOV[1]     -> row 0 is +Y
+        ray = normalize((x, y, 1))              boresight along +Z
+
+    This replaces bilinear interpolation of the getfov() corner vectors, which assumed a
+    corner order getfov() does not return (it returns (+X,+Y), (-X,+Y), (-X,-Y), (+X,-Y))
+    and so mapped column 0 to +X, mirroring every image left-right against its geometry.
+    Pixel centres also now sit at CCD_CENTER +/- k*IFOV rather than on the FOV edges.
+    Optical distortion is not modelled (neither was it before).
 
     Returns an (ny, nx, 3) array of unit vectors in the camera frame.
     """
-    bounds = np.asarray(bounds, dtype=np.float64)
-    corners = bounds.T if bounds.shape[0] == 3 else bounds
-
-    if corners.shape[0] < 4:
-        raise RuntimeError("Camera FOV does not provide rectangular bounds.")
-
-    c0, c1, c2, c3 = corners[:4]
     ny, nx = image_shape
-    u = np.linspace(0.0, 1.0, nx, dtype=np.float64)
-    v = np.linspace(0.0, 1.0, ny, dtype=np.float64)
-
-    top = (1.0 - u)[:, None] * c0 + u[:, None] * c1
-    bottom = (1.0 - u)[:, None] * c3 + u[:, None] * c2
-
-    rays = (1.0 - v)[:, None, None] * top[None, :, :] + v[:, None, None] * bottom[None, :, :]
+    cols = np.arange(nx, dtype=np.float64)
+    rows = np.arange(ny, dtype=np.float64)
+    x = (cols - ccd_center[0]) * ifov[0]
+    y = (ccd_center[1] - rows) * ifov[1]
+    rays = np.empty((ny, nx, 3), dtype=np.float64)
+    rays[:, :, 0] = x[None, :]
+    rays[:, :, 1] = y[:, None]
+    rays[:, :, 2] = 1.0
     rays /= np.linalg.norm(rays, axis=2, keepdims=True)
     return rays
+
+
+def check_rays_against_fov_corners(rays: np.ndarray, bounds: np.ndarray, tol_rad: float) -> None:
+    """Fail loudly if the ray grid's outer corners disagree with getfov()'s boundary
+    vectors, matched by the sign of their X/Y components (order-independent), so a future
+    axis-convention change cannot silently mirror the geometry again."""
+    corners = {(-1, 1): rays[0, 0], (1, 1): rays[0, -1], (1, -1): rays[-1, -1], (-1, -1): rays[-1, 0]}
+    for b in np.asarray(bounds, dtype=np.float64).reshape(-1, 3):
+        b = b / np.linalg.norm(b)
+        key = (int(np.sign(b[0])), int(np.sign(b[1])))
+        if key not in corners:
+            raise RuntimeError(f"FOV boundary vector {b} has a zero X or Y component")
+        sep = float(np.arccos(np.clip(np.dot(corners[key], b), -1.0, 1.0)))
+        if sep > tol_rad:
+            raise RuntimeError(
+                f"Pixel-ray corner {key} is {sep:.3e} rad from getfov boundary {b} "
+                f"(tolerance {tol_rad:.3e}); camera axis convention mismatch"
+            )
+
+
+def exposure_duration_seconds(exposure_duration: Any) -> float:
+    """EXPOSURE_DURATION as seconds. PDS3 FC labels carry it as a pvl Quantity in
+    milliseconds (e.g. 10.000 <millisecond>); float() of that Quantity silently returns
+    the bare number, so the unit must be read explicitly."""
+    units = str(getattr(exposure_duration, "units", "") or "").strip().lower()
+    value = float(getattr(exposure_duration, "value", exposure_duration))
+    if units in ("ms", "msec", "millisecond", "milliseconds"):
+        return value / 1000.0
+    if units in ("s", "sec", "second", "seconds"):
+        return value
+    raise ValueError(f"EXPOSURE_DURATION has missing or unknown units: {exposure_duration!r}")
 
 
 def compute_pixel_solid_angles(rays: np.ndarray) -> np.ndarray:
@@ -375,6 +416,8 @@ class GeometryEngine:
             self.cam_id = spiceypy.bodn2c(self.instrument)
             _, self.cam_frame, self.boresight, self.num_bounds, self.bounds = spiceypy.getfov(self.cam_id, 4)
             self.cam_frame = _as_str(self.cam_frame)
+            self.ccd_center = tuple(spiceypy.gdpool(f"INS{self.cam_id}_CCD_CENTER", 0, 2))
+            self.ifov = tuple(spiceypy.gdpool(f"INS{self.cam_id}_IFOV", 0, 2))
             logging.info("Successfully loaded camera model for %s", self.instrument)
         except Exception as e:
             _log_fatal_geometry_missing(f"camera FOV lookup failed for {self.instrument}", e)
@@ -410,15 +453,18 @@ class GeometryEngine:
             raise
 
         try:
-            exposure_seconds = float(exposure_duration)
+            exposure_seconds = exposure_duration_seconds(exposure_duration)
         except (TypeError, ValueError) as exc:
             raise ValueError(f"Invalid EXPOSURE_DURATION value: {exposure_duration!r}") from exc
 
         return start_et + 0.5 * exposure_seconds
 
     def _pixel_rays(self, image_shape: tuple[int, int]) -> np.ndarray:
-        """Build per-pixel camera rays by bilinear interpolation of FOV corner vectors."""
-        return compute_pixel_rays(self.bounds, image_shape)
+        """Build per-pixel camera rays from the IK pinhole model, checked against getfov()."""
+        rays = compute_pixel_rays(image_shape, self.ccd_center, self.ifov)
+        # Corner pixel centres sit half a pixel inside the FOV edge; allow two pixels.
+        check_rays_against_fov_corners(rays, self.bounds, tol_rad=2.0 * max(self.ifov))
+        return rays
 
     def _log_pointing_diagnostics(self, et: float, image_shape: tuple[int, int], rays: np.ndarray, image_id: str) -> None:
         """Log frame, boresight, and FOV diagnostics for one image/time (Non-fatal)."""
