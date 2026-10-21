@@ -1,4 +1,10 @@
-"""X-mirror deterministic classification (replaces the noisy correlation-based
+"""NOTE (Oct 2026): the x-mirror turned out to affect EVERY pre-fix image (getfov corner
+order vs IK convention in compute_pixel_rays; see .claude/CLAUDE.md "CRITICAL:
+pixel-geometry bugs"). CORRECT labels in outputs/diagnostics/xmirror_classification.csv
+are classifier misses (close-ups, weak incidence gradients), not unaffected images. On
+products ground after the fix, CORRECT is the expected label for every image.
+
+X-mirror deterministic classification (replaces the noisy correlation-based
 detection from the prior, closed investigation session).
 
 For each sampled image, loads its per-pixel geometry parquet
