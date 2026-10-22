@@ -77,6 +77,7 @@ from photometry_etl.etl.geometry_engine import (  # noqa: E402
     calibrate_iof_data,
     compute_pixel_solid_angles,
     compute_projected_area_km2,
+    sample_axis_for_phase,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -445,7 +446,7 @@ def predict_target_pixel(
     target_vec_cam = np.asarray(j2000_to_cam) @ np.asarray(target_vec_j2000)
     target_vec_cam = target_vec_cam / np.linalg.norm(target_vec_cam)
 
-    pixel_rays_grid = engine._pixel_rays(image_shape)
+    pixel_rays_grid = engine._pixel_rays(image_shape, sample_axis_for_phase("approach"))
     dot = np.einsum("ijk,k->ij", pixel_rays_grid, target_vec_cam)
     row, col = np.unravel_index(np.argmax(dot), dot.shape)
     return float(row), float(col)
@@ -506,7 +507,7 @@ def process_frame(
     iof = calibrate_iof_data(pds_img.image, image_id, distance_au, f_solar=engine.f_solar)
 
     # Per-pixel solid angle depends only on camera FOV geometry -- no ray tracing.
-    pixel_rays_grid = engine._pixel_rays(iof.shape)
+    pixel_rays_grid = engine._pixel_rays(iof.shape, sample_axis_for_phase("approach"))
     pixel_solid_angle_sr = compute_pixel_solid_angles(pixel_rays_grid)
 
     # ONE spacecraft-to-target range for the whole frame. Valid because the target

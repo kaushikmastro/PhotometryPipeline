@@ -1,12 +1,14 @@
 import argparse
 import logging
 import multiprocessing
-from pathlib import Path
 import sys
+from pathlib import Path
+
+import pandas as pd
 import pyarrow.parquet as pq
 
 # Absolute package path resolution following formal repository architecture standards
-from photometry_etl.etl.geometry_engine import GeometryEngine
+from photometry_etl.etl.geometry_engine import GeometryEngine, write_orientation_manifest
 
 # Thread-isolated storage reference for processing node workers
 _engine_worker = None
@@ -198,6 +200,13 @@ def main():
     
     logging.info("ETL Tracking Sequence Finalized. Successful files: %d, Terminal task errors: %d", 
                  successful_count, len(failed_jobs))
+
+    # Per-image orientation verdicts (sidecars written by GeometryEngine) -> one manifest.
+    # Downstream silver/golden builds must keep only status == "PASS" images.
+    manifest_path = write_orientation_manifest(target_output_root)
+    manifest = pd.read_csv(manifest_path) if manifest_path.stat().st_size > 1 else pd.DataFrame()
+    if not manifest.empty:
+        logging.info("Orientation manifest %s: %s", manifest_path, manifest["status"].value_counts().to_dict())
     
     if failed_jobs:
         logging.critical("Pipeline processing run finished with system failures. Aborting cluster tracking state.")
