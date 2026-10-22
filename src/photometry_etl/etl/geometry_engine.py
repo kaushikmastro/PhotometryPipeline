@@ -321,9 +321,12 @@ def orientation_check(iof: np.ndarray, incidence_deg: np.ndarray, emission_deg: 
         "iou_asis": _iou(bright, lit),
         "iou_xflip": _iou(np.fliplr(bright), lit),
     }
-    c_a, c_f = np.nan_to_num(out["corr_asis"], nan=-2.0), np.nan_to_num(out["corr_xflip"], nan=-2.0)
-    i_a, i_f = np.nan_to_num(out["iou_asis"], nan=0.0), np.nan_to_num(out["iou_xflip"], nan=0.0)
-    if c_a - c_f >= ORIENTATION_CORR_MARGIN and i_a >= i_f - ORIENTATION_IOU_SLACK:
+    c_a, c_f, i_a, i_f = out["corr_asis"], out["corr_xflip"], out["iou_asis"], out["iou_xflip"]
+    if not all(np.isfinite(v) for v in (c_a, c_f, i_a, i_f)):
+        # An undefined score on either side (too few usable pixels, empty masks) can't
+        # support a verdict -- never let it count as a win for the other orientation.
+        out["verdict"] = "undetermined"
+    elif c_a - c_f >= ORIENTATION_CORR_MARGIN and i_a >= i_f - ORIENTATION_IOU_SLACK:
         out["verdict"] = "as_is"
     elif c_f - c_a >= ORIENTATION_CORR_MARGIN and i_f >= i_a - ORIENTATION_IOU_SLACK:
         out["verdict"] = "x_flipped"
@@ -340,9 +343,16 @@ def write_orientation_manifest(output_root: str | Path) -> Path:
     import json
 
     output_root = Path(output_root)
-    rows = [json.loads(p.read_text()) for p in sorted(output_root.rglob("*_orientation.json"))]
+    rows = []
+    for p in sorted(output_root.rglob("*_orientation.json")):
+        try:
+            rows.append(json.loads(p.read_text()))
+        except (OSError, ValueError) as exc:  # half-written by a concurrent task, or I/O error
+            logging.warning("Skipping unreadable orientation sidecar %s: %s", p, exc)
     path = output_root / "orientation_manifest.csv"
-    pd.DataFrame(rows).to_csv(path, index=False)
+    tmp = path.with_suffix(".csv.tmp")
+    pd.DataFrame(rows).to_csv(tmp, index=False)
+    tmp.replace(path)
     return path
 
 

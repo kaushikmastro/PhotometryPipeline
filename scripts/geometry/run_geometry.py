@@ -203,10 +203,16 @@ def main():
 
     # Per-image orientation verdicts (sidecars written by GeometryEngine) -> one manifest.
     # Downstream silver/golden builds must keep only status == "PASS" images.
-    manifest_path = write_orientation_manifest(target_output_root)
-    manifest = pd.read_csv(manifest_path) if manifest_path.stat().st_size > 1 else pd.DataFrame()
-    if not manifest.empty:
-        logging.info("Orientation manifest %s: %s", manifest_path, manifest["status"].value_counts().to_dict())
+    # Best effort: when several array tasks share one output root, a final single-writer
+    # write_orientation_manifest() after the array is the authoritative manifest; a failure
+    # here must not mark a task whose images all succeeded as failed.
+    try:
+        manifest_path = write_orientation_manifest(target_output_root)
+        manifest = pd.read_csv(manifest_path) if manifest_path.stat().st_size > 1 else pd.DataFrame()
+        if not manifest.empty:
+            logging.info("Orientation manifest %s: %s", manifest_path, manifest["status"].value_counts().to_dict())
+    except Exception as exc:
+        logging.warning("Orientation manifest not written (%s); rebuild it after all tasks finish.", exc)
     
     if failed_jobs:
         logging.critical("Pipeline processing run finished with system failures. Aborting cluster tracking state.")

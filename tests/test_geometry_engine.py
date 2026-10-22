@@ -348,6 +348,35 @@ def test_orientation_check_flags_featureless_image() -> None:
     assert out["verdict"] == "undetermined" and out["status"] == "FLAGGED"
 
 
+def test_orientation_check_flags_undefined_flip_score() -> None:
+    """HAMO FC21B0006948 (D pilots): corr as-is +0.015, x-flip NaN. An undefined score
+    must give FLAGGED, not a PASS by default."""
+    iof, inc, emi = _synthetic_disk()
+    # Leave >100 usable pixels as-is but almost none after the flip: bright only in a
+    # narrow strip on the right edge, geometry only where that strip is.
+    keep = np.zeros_like(iof, dtype=bool)
+    keep[:, 150:] = True
+    inc2, emi2 = np.where(keep, inc, np.nan), np.where(keep, emi, np.nan)
+    iof2 = np.where(keep, iof, 0.0)
+    out = orientation_check(iof2, inc2, emi2)
+    assert np.isnan(out["corr_xflip"]) and np.isfinite(out["corr_asis"])
+    assert out["verdict"] == "undetermined" and out["status"] == "FLAGGED"
+
+
+def test_orientation_manifest_skips_unreadable_sidecar(tmp_path: Path) -> None:
+    import json
+
+    from photometry_etl.etl.geometry_engine import write_orientation_manifest
+
+    (tmp_path / "survey").mkdir()
+    (tmp_path / "survey" / "A_orientation.json").write_text(json.dumps({"image_id": "A", "status": "PASS"}))
+    (tmp_path / "survey" / "B_orientation.json").write_text("")  # half-written
+    import pandas as pd
+
+    m = pd.read_csv(write_orientation_manifest(tmp_path))
+    assert m["image_id"].tolist() == ["A"]
+
+
 # ---------------------------------------------------------------------------
 # Real-data regression: orientation of known controls (slow; needs the products)
 # ---------------------------------------------------------------------------
