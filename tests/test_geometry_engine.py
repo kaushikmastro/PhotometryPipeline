@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import numpy as np
 import pytest
 
 from photometry_etl.etl.geometry_engine import (
+    SAMPLE_AXIS_BY_PHASE,
+    GeometryEngine,
     calibrate_iof_data,
     check_rays_against_fov_corners,
     compute_pixel_area_km2,
@@ -13,6 +16,8 @@ from photometry_etl.etl.geometry_engine import (
     compute_pixel_solid_angles,
     compute_projected_area_km2,
     exposure_duration_seconds,
+    orientation_check,
+    sample_axis_for_phase,
 )
 
 # DAWN_FC2 (-203120) pinhole parameters, dawn_fc_v02.ti
@@ -258,25 +263,122 @@ def test_compute_projected_area_km2_nan_inputs_propagate() -> None:
     assert np.all(np.isnan(projected))
 
 # ---------------------------------------------------------------------------
-# Real-data regression: pixel <-> geometry pairing on a known x-mirrored image
+# Per-phase sample axis (orientation is NOT uniform across the mission)
 # ---------------------------------------------------------------------------
-_MIRROR_CONTROL = (
-    Path(__file__).resolve().parents[1]
-    / "data/geometry/gaskell_dsk256_110825/survey/FC21B0006203_11236015531F1B_geometry.parquet"
+
+
+@pytest.mark.parametrize(
+    ("phase", "axis"), [("survey", "col0_minus_x"), ("hamo", "col0_plus_x"), ("lamo", "col0_plus_x")]
 )
+def test_sample_axis_for_configured_phases(phase: str, axis: str) -> None:
+    assert sample_axis_for_phase(phase) == axis
+
+
+@pytest.mark.parametrize("phase", ["rc", "approach", "cruise", "unknown", None])
+def test_sample_axis_raises_for_unconfigured_phases(phase: str | None) -> None:
+    with pytest.raises(ValueError, match="No FC2 sample-axis orientation"):
+        sample_axis_for_phase(phase)
+    assert phase not in SAMPLE_AXIS_BY_PHASE
+
+
+def test_strict_phase_lookup_has_no_silent_default() -> None:
+    strict = GeometryEngine._strict_phase_from_image_path
+    assert strict(Path("/x/calibrated_raw_images/hamo/FC21B0009251_11277030017F1G.IMG")) == "hamo"
+    assert strict(Path("/tmp/adhoc/FC21B0009251_11277030017F1G.IMG")) is None
+
+
+def test_col0_plus_x_grid_is_the_column_mirror_of_col0_minus_x() -> None:
+    minus = compute_pixel_rays(FC2_SHAPE, FC2_CCD_CENTER, FC2_IFOV, "col0_minus_x")
+    plus = compute_pixel_rays(FC2_SHAPE, FC2_CCD_CENTER, FC2_IFOV, "col0_plus_x")
+    np.testing.assert_allclose(plus[:, :, 0], -minus[:, :, 0], atol=0)
+    np.testing.assert_allclose(plus[:, :, 1:], minus[:, :, 1:], atol=0)
+    assert plus[511, 0, 0] > 0 and minus[511, 0, 0] < 0
+    with pytest.raises(ValueError, match="sample_axis"):
+        compute_pixel_rays(FC2_SHAPE, FC2_CCD_CENTER, FC2_IFOV, "col0_up")
+
+
+def test_corner_check_accepts_each_axis_only_for_its_own_grid() -> None:
+    n, half = 200, 0.0477
+    centre, ifov = _square_pinhole(n, half)
+    corners, tol = _square_fov_corners(half), 2.0 * ifov[0]
+    for axis in ("col0_minus_x", "col0_plus_x"):
+        rays = compute_pixel_rays((n, n), centre, ifov, axis)
+        check_rays_against_fov_corners(rays, corners, tol_rad=tol, sample_axis=axis)
+        other = "col0_plus_x" if axis == "col0_minus_x" else "col0_minus_x"
+        with pytest.raises(RuntimeError, match="axis convention mismatch"):
+            check_rays_against_fov_corners(rays, corners, tol_rad=tol, sample_axis=other)
+
+
+# ---------------------------------------------------------------------------
+# Per-image orientation check
+# ---------------------------------------------------------------------------
+
+
+def _synthetic_disk(n: int = 200) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Sphere filling part of the frame, Sun from the image-plane +x side: incidence and
+    emission grids (NaN off-body) plus a Lommel-Seeliger I/F with an x gradient."""
+    yy, xx = np.mgrid[-1:1:n * 1j, -1:1:n * 1j]
+    r2 = xx**2 + (yy * 1.1) ** 2
+    on = r2 < 0.8
+    nz = np.sqrt(np.clip(1.0 - r2, 0, None))
+    sun = np.array([0.6, 0.0, 0.8])
+    mu0 = np.where(on, xx * sun[0] + nz * sun[2], np.nan)
+    mu = np.where(on, nz, np.nan)
+    with np.errstate(invalid="ignore"):
+        lit = on & (mu0 > 0)
+        inc = np.where(on, np.rad2deg(np.arccos(np.clip(mu0, -1, 1))), np.nan)
+        emi = np.where(on, np.rad2deg(np.arccos(np.clip(mu, -1, 1))), np.nan)
+        iof = np.where(lit, 0.3 * mu0 / (mu0 + mu), 0.0)
+    return iof, inc, emi
+
+
+def test_orientation_check_passes_matching_and_fails_mirrored_image() -> None:
+    iof, inc, emi = _synthetic_disk()
+    ok = orientation_check(iof, inc, emi)
+    assert ok["verdict"] == "as_is" and ok["status"] == "PASS"
+    assert ok["corr_asis"] > ok["corr_xflip"] and ok["iou_asis"] > ok["iou_xflip"]
+    bad = orientation_check(np.fliplr(iof), inc, emi)
+    assert bad["verdict"] == "x_flipped" and bad["status"] == "FAILED"
+
+
+def test_orientation_check_flags_featureless_image() -> None:
+    _, inc, emi = _synthetic_disk()
+    flat = np.where(np.isfinite(inc), 0.1, 0.0)
+    out = orientation_check(flat, inc, emi)
+    assert out["verdict"] == "undetermined" and out["status"] == "FLAGGED"
+
+
+# ---------------------------------------------------------------------------
+# Real-data regression: orientation of known controls (slow; needs the products)
+# ---------------------------------------------------------------------------
+_REPO = Path(__file__).resolve().parents[1]
+_V2_ROOT = Path(os.environ.get("GEOMETRY_V2_ROOT", _REPO / "data/geometry/gaskell_dsk256_110825_v2"))
+_V1_ROOT = Path(os.environ.get("GEOMETRY_V1_ROOT", _REPO / "data/geometry/gaskell_dsk256_110825"))
+_ORIENTATION_CONTROLS = [
+    # Survey: correct only with the new mapping (col0_minus_x) -> v2 product.
+    ("survey", "FC21B0006203_11236015531F1B", _V2_ROOT),
+    # HAMO / LAMO: correct with the old mapping (col0_plus_x), which the v1 products used.
+    ("hamo", "FC21B0009251_11277030017F1G", _V1_ROOT),
+    ("lamo", "FC21B3021977_12071112848F1C", _V1_ROOT),
+]
+
+
+def _grid(df, col: str) -> np.ndarray:
+    g = np.full((1024, 1024), np.nan)
+    g[df["pixel_y"].to_numpy(), df["pixel_x"].to_numpy()] = df[col].to_numpy()
+    return g
 
 
 @pytest.mark.slow
-@pytest.mark.skipif(not _MIRROR_CONTROL.exists(), reason="geometry product not available")
-def test_iof_correlates_with_lommel_seeliger_on_mirror_control() -> None:
-    """FC21B0006203_11236015531F1B gave corr(iof, LS) = -0.26 as ground (x-mirrored) and
-    +0.45 after np.fliplr(iof). After regeneration with the fixed ray grid the as-is
-    correlation must be positive. Fails on products ground before the fix -- by design."""
+@pytest.mark.parametrize(("phase", "image_id", "root"), _ORIENTATION_CONTROLS)
+def test_orientation_controls_pass(phase: str, image_id: str, root: Path) -> None:
+    """DSK pilots (Oct 2026): corr(iof, LS) +0.451 Survey (new mapping), +0.368 HAMO and
+    +0.507 LAMO (old mapping); the opposite mapping gives +0.068 / -0.40 for HAMO / LAMO."""
     import pandas as pd
 
-    df = pd.read_parquet(_MIRROR_CONTROL, columns=["iof", "incidence", "emission"])
-    df = df[(df["iof"] > 0.01) & (df["incidence"] < 80) & (df["emission"] < 80)]
-    mu0 = np.cos(np.deg2rad(df["incidence"].to_numpy()))
-    mu = np.cos(np.deg2rad(df["emission"].to_numpy()))
-    ls = mu0 / (mu0 + mu)
-    assert np.corrcoef(df["iof"].to_numpy(), ls)[0, 1] > 0.2
+    path = root / phase / f"{image_id}_geometry.parquet"
+    if not path.exists():
+        pytest.skip(f"geometry product not available: {path}")
+    df = pd.read_parquet(path, columns=["pixel_x", "pixel_y", "iof", "incidence", "emission"])
+    out = orientation_check(_grid(df, "iof"), _grid(df, "incidence"), _grid(df, "emission"))
+    assert out["status"] == "PASS", out

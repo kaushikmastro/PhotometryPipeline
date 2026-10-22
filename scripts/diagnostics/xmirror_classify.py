@@ -1,8 +1,9 @@
-"""NOTE (Oct 2026): the x-mirror turned out to affect EVERY pre-fix image (getfov corner
-order vs IK convention in compute_pixel_rays; see .claude/CLAUDE.md "CRITICAL:
-pixel-geometry bugs"). CORRECT labels in outputs/diagnostics/xmirror_classification.csv
-are classifier misses (close-ups, weak incidence gradients), not unaffected images. On
-products ground after the fix, CORRECT is the expected label for every image.
+"""NOTE (Oct 2026): the pre-fix x-mirror is phase-dependent (see .claude/CLAUDE.md
+"CRITICAL: pixel-geometry bugs"): Survey products are mirrored, HAMO/LAMO products were
+oriented correctly in the DSK pilots. CORRECT labels for HAMO/LAMO in
+outputs/diagnostics/xmirror_classification.csv were right; MIRRORED labels outside Survey
+need re-checking. New grinds carry their own per-image verdict (orientation_check in
+geometry_engine.py, orientation_manifest.csv), which supersedes this classifier.
 
 X-mirror deterministic classification (replaces the noisy correlation-based
 detection from the prior, closed investigation session).

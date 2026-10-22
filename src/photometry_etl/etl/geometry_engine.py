@@ -178,34 +178,61 @@ def calibrate_iof_data(raw_image: np.ndarray, image_id: str, distance_au: float,
     return iof_data
 
 
+# Column direction of the FC2 image array relative to camera +X, per mission phase.
+#   "col0_minus_x": column 0 looks toward -X (dawn_fc_v02.ti "Apparent FOV Layout").
+#   "col0_plus_x" : column 0 looks toward +X (what the pre-a94b0cb corner interpolation did).
+# Set from per-image DSK pilots against the raw I/F (Oct 2026): Survey FC21B0006203 matches
+# col0_minus_x; HAMO FC21B0009251 and LAMO FC21B3021977 match col0_plus_x. The physical
+# reason the phases differ is NOT known yet. Phases not listed here raise: add them only
+# after a pilot has established their orientation. Every image is still checked after
+# geometry (orientation_check), whatever this table says.
+SAMPLE_AXIS_BY_PHASE: dict[str, str] = {
+    "survey": "col0_minus_x",
+    "hamo": "col0_plus_x",
+    "lamo": "col0_plus_x",
+}
+SAMPLE_AXES = ("col0_minus_x", "col0_plus_x")
+
+
+def sample_axis_for_phase(phase: str | None) -> str:
+    """Pixel-column orientation for a mission phase; raises for unconfigured phases."""
+    if phase not in SAMPLE_AXIS_BY_PHASE:
+        raise ValueError(
+            f"No FC2 sample-axis orientation configured for phase {phase!r} "
+            f"(configured: {sorted(SAMPLE_AXIS_BY_PHASE)}). Run a DSK orientation pilot "
+            "for this phase and add it to SAMPLE_AXIS_BY_PHASE before grinding it."
+        )
+    return SAMPLE_AXIS_BY_PHASE[phase]
+
+
 def compute_pixel_rays(
     image_shape: tuple[int, int],
     ccd_center: tuple[float, float],
     ifov: tuple[float, float],
+    sample_axis: str = "col0_minus_x",
 ) -> np.ndarray:
     """Build per-pixel camera ray unit vectors from the instrument kernel's pinhole model.
 
-    Axis convention (dawn_fc_v02.ti, "Apparent FOV Layout": pixel (0,0) is the lower-left
-    corner, +X points toward increasing sample, +Y toward decreasing line), with array
-    row index == PDS line and column index == PDS sample, exactly as PDS3Image.open
-    returns the image:
+    Array row index == PDS line and column index == PDS sample, exactly as
+    PDS3Image.open returns the image:
 
-        x = (col - CCD_CENTER[0]) * IFOV[0]     -> col 0 is -X
-        y = (CCD_CENTER[1] - row) * IFOV[1]     -> row 0 is +Y
-        ray = normalize((x, y, 1))              boresight along +Z
+        x = s * (col - CCD_CENTER[0]) * IFOV[0]   s = +1 for "col0_minus_x", -1 for "col0_plus_x"
+        y = (CCD_CENTER[1] - row) * IFOV[1]       row 0 is +Y (both phases)
+        ray = normalize((x, y, 1))                boresight along +Z
 
-    This replaces bilinear interpolation of the getfov() corner vectors, which assumed a
-    corner order getfov() does not return (it returns (+X,+Y), (-X,+Y), (-X,-Y), (+X,-Y))
-    and so mapped column 0 to +X, mirroring every image left-right against its geometry.
-    Pixel centres also now sit at CCD_CENTER +/- k*IFOV rather than on the FOV edges.
-    Optical distortion is not modelled (neither was it before).
+    The column direction is not uniform across the mission (see SAMPLE_AXIS_BY_PHASE), so
+    it is an explicit argument rather than a hidden convention. Optical distortion is not
+    modelled.
 
     Returns an (ny, nx, 3) array of unit vectors in the camera frame.
     """
+    if sample_axis not in SAMPLE_AXES:
+        raise ValueError(f"sample_axis must be one of {SAMPLE_AXES}, got {sample_axis!r}")
+    sign = 1.0 if sample_axis == "col0_minus_x" else -1.0
     ny, nx = image_shape
     cols = np.arange(nx, dtype=np.float64)
     rows = np.arange(ny, dtype=np.float64)
-    x = (cols - ccd_center[0]) * ifov[0]
+    x = sign * (cols - ccd_center[0]) * ifov[0]
     y = (ccd_center[1] - rows) * ifov[1]
     rays = np.empty((ny, nx, 3), dtype=np.float64)
     rays[:, :, 0] = x[None, :]
@@ -215,11 +242,14 @@ def compute_pixel_rays(
     return rays
 
 
-def check_rays_against_fov_corners(rays: np.ndarray, bounds: np.ndarray, tol_rad: float) -> None:
+def check_rays_against_fov_corners(
+    rays: np.ndarray, bounds: np.ndarray, tol_rad: float, sample_axis: str = "col0_minus_x"
+) -> None:
     """Fail loudly if the ray grid's outer corners disagree with getfov()'s boundary
-    vectors, matched by the sign of their X/Y components (order-independent), so a future
-    axis-convention change cannot silently mirror the geometry again."""
-    corners = {(-1, 1): rays[0, 0], (1, 1): rays[0, -1], (1, -1): rays[-1, -1], (-1, -1): rays[-1, 0]}
+    vectors (matched by the sign of their X/Y components, never by order) or if the grid's
+    column direction is not the one requested."""
+    sx = -1 if sample_axis == "col0_minus_x" else 1   # X sign of column 0
+    corners = {(sx, 1): rays[0, 0], (-sx, 1): rays[0, -1], (-sx, -1): rays[-1, -1], (sx, -1): rays[-1, 0]}
     for b in np.asarray(bounds, dtype=np.float64).reshape(-1, 3):
         b = b / np.linalg.norm(b)
         key = (int(np.sign(b[0])), int(np.sign(b[1])))
@@ -229,7 +259,7 @@ def check_rays_against_fov_corners(rays: np.ndarray, bounds: np.ndarray, tol_rad
         if sep > tol_rad:
             raise RuntimeError(
                 f"Pixel-ray corner {key} is {sep:.3e} rad from getfov boundary {b} "
-                f"(tolerance {tol_rad:.3e}); camera axis convention mismatch"
+                f"(tolerance {tol_rad:.3e}); camera axis convention mismatch for {sample_axis}"
             )
 
 
@@ -244,6 +274,92 @@ def exposure_duration_seconds(exposure_duration: Any) -> float:
     if units in ("s", "sec", "second", "seconds"):
         return value
     raise ValueError(f"EXPOSURE_DURATION has missing or unknown units: {exposure_duration!r}")
+
+
+ORIENTATION_CORR_MARGIN = 0.05   # required lead of the winning orientation in corr(iof, LS)
+ORIENTATION_IOU_SLACK = 0.01     # the winner's lit-mask IoU may trail by at most this much
+
+
+def _iou(a: np.ndarray, b: np.ndarray) -> float:
+    union = np.logical_or(a, b).sum()
+    return float(np.logical_and(a, b).sum() / union) if union else float("nan")
+
+
+def orientation_check(iof: np.ndarray, incidence_deg: np.ndarray, emission_deg: np.ndarray) -> dict:
+    """Score how well an image's I/F matches its computed geometry as-is vs x-flipped.
+
+    Inputs are (ny, nx) grids; geometry is NaN where the ray missed the body.
+      corr_asis / corr_xflip : corr(iof, LS) with LS = mu0/(mu0+mu), over pixels with
+                               iof > 0.01, incidence < 80, emission < 80
+      iou_asis / iou_xflip   : IoU of the bright mask (iof > 5% of its 99th percentile)
+                               with the predicted lit mask (incidence < 90)
+    verdict: "as_is" when as-is wins corr by ORIENTATION_CORR_MARGIN without losing IoU,
+    "x_flipped" for the reverse, else "undetermined". status: PASS / FAILED / FLAGGED.
+    """
+    iof = np.asarray(iof, dtype=np.float64)
+    inc = np.asarray(incidence_deg, dtype=np.float64)
+    emi = np.asarray(emission_deg, dtype=np.float64)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        mu0, mu = np.cos(np.deg2rad(inc)), np.cos(np.deg2rad(emi))
+        ls = mu0 / (mu0 + mu)
+
+    def corr(img: np.ndarray) -> float:
+        with np.errstate(invalid="ignore"):
+            m = np.isfinite(img) & np.isfinite(ls) & (img > 0.01) & (inc < 80) & (emi < 80)
+        if m.sum() < 100:
+            return float("nan")
+        return float(np.corrcoef(img[m], ls[m])[0, 1])
+
+    finite = iof[np.isfinite(iof)]
+    p99 = float(np.percentile(finite, 99)) if finite.size else float("nan")
+    with np.errstate(invalid="ignore"):
+        bright = np.nan_to_num(iof, nan=0.0) > 0.05 * p99
+        lit = np.isfinite(inc) & (inc < 90)
+    out = {
+        "corr_asis": corr(iof),
+        "corr_xflip": corr(np.fliplr(iof)),
+        "iou_asis": _iou(bright, lit),
+        "iou_xflip": _iou(np.fliplr(bright), lit),
+    }
+    c_a, c_f = np.nan_to_num(out["corr_asis"], nan=-2.0), np.nan_to_num(out["corr_xflip"], nan=-2.0)
+    i_a, i_f = np.nan_to_num(out["iou_asis"], nan=0.0), np.nan_to_num(out["iou_xflip"], nan=0.0)
+    if c_a - c_f >= ORIENTATION_CORR_MARGIN and i_a >= i_f - ORIENTATION_IOU_SLACK:
+        out["verdict"] = "as_is"
+    elif c_f - c_a >= ORIENTATION_CORR_MARGIN and i_f >= i_a - ORIENTATION_IOU_SLACK:
+        out["verdict"] = "x_flipped"
+    else:
+        out["verdict"] = "undetermined"
+    out["status"] = {"as_is": "PASS", "x_flipped": "FAILED", "undetermined": "FLAGGED"}[out["verdict"]]
+    return out
+
+
+def write_orientation_manifest(output_root: str | Path) -> Path:
+    """Collect every <image_id>_orientation.json sidecar under output_root into
+    output_root/orientation_manifest.csv (one row per image). Downstream builds must use
+    only status == "PASS" images from this manifest."""
+    import json
+
+    output_root = Path(output_root)
+    rows = [json.loads(p.read_text()) for p in sorted(output_root.rglob("*_orientation.json"))]
+    path = output_root / "orientation_manifest.csv"
+    pd.DataFrame(rows).to_csv(path, index=False)
+    return path
+
+
+def _code_commit() -> str:
+    """Commit of the code doing the grind (env GEOMETRY_CODE_COMMIT wins), for provenance."""
+    import os
+    import subprocess
+
+    if os.environ.get("GEOMETRY_CODE_COMMIT"):
+        return os.environ["GEOMETRY_CODE_COMMIT"]
+    try:
+        return subprocess.run(
+            ["git", "-C", str(Path(__file__).resolve().parent), "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, timeout=10, check=True,
+        ).stdout.strip()
+    except Exception:
+        return "unknown"
 
 
 def compute_pixel_solid_angles(rays: np.ndarray) -> np.ndarray:
@@ -384,6 +500,7 @@ class GeometryEngine:
         self._initialize_spice()
 
         self.instrument = "DAWN_FC2"
+        self.code_commit = _code_commit()
         self.target = "VESTA"
         self.observer = "DAWN"
         
@@ -459,11 +576,11 @@ class GeometryEngine:
 
         return start_et + 0.5 * exposure_seconds
 
-    def _pixel_rays(self, image_shape: tuple[int, int]) -> np.ndarray:
+    def _pixel_rays(self, image_shape: tuple[int, int], sample_axis: str) -> np.ndarray:
         """Build per-pixel camera rays from the IK pinhole model, checked against getfov()."""
-        rays = compute_pixel_rays(image_shape, self.ccd_center, self.ifov)
+        rays = compute_pixel_rays(image_shape, self.ccd_center, self.ifov, sample_axis)
         # Corner pixel centres sit half a pixel inside the FOV edge; allow two pixels.
-        check_rays_against_fov_corners(rays, self.bounds, tol_rad=2.0 * max(self.ifov))
+        check_rays_against_fov_corners(rays, self.bounds, tol_rad=2.0 * max(self.ifov), sample_axis=sample_axis)
         return rays
 
     def _log_pointing_diagnostics(self, et: float, image_shape: tuple[int, int], rays: np.ndarray, image_id: str) -> None:
@@ -520,6 +637,16 @@ class GeometryEngine:
             logging.warning("Non-fatal fovtrg validation diagnostic skipped for %s: %s", image_id, exc)
 
     @staticmethod
+    def _strict_phase_from_image_path(image_path: Path) -> str | None:
+        """Mission phase from the image path, or None -- no silent default (used to pick
+        the pixel orientation, where a wrong guess mirrors the geometry)."""
+        parts_lower = [part.lower() for part in Path(image_path).parts]
+        for phase in ("rc", "survey", "hamo", "lamo", "approach"):
+            if phase in parts_lower:
+                return phase
+        return None
+
+    @staticmethod
     def _phase_subdir_from_image_path(image_path: Path) -> str:
         """Resolve phase output subdir from an image path; defaults to survey.
 
@@ -565,6 +692,8 @@ class GeometryEngine:
         image_path = Path(image_file_path)
         image_id = image_path.stem
         phase_subdir = self._phase_subdir_from_image_path(image_path)
+        orientation_phase = self._strict_phase_from_image_path(image_path)
+        sample_axis = sample_axis_for_phase(orientation_phase)  # raises before any SPICE work
         logging.info("Computing geometry for image: %s", image_id)
 
         # GRANULAR ERROR OBSERVABILITY EXTRACTION STAGES
@@ -609,7 +738,7 @@ class GeometryEngine:
         if iof_data.ndim != 2:
             raise ValueError(f"Expected 2D image array, got shape {image_shape}")
 
-        pixel_rays_grid = self._pixel_rays(image_shape)
+        pixel_rays_grid = self._pixel_rays(image_shape, sample_axis)
         rays_flat = pixel_rays_grid.reshape(-1, 3)
         self._log_pointing_diagnostics(et, image_shape, pixel_rays_grid, image_id)
 
@@ -676,6 +805,17 @@ class GeometryEngine:
         phase = np.rad2deg(phase)
         incidence = np.rad2deg(incidence)
         emission = np.rad2deg(emission)
+        orientation = orientation_check(
+            iof_data, incidence.reshape(image_shape), emission.reshape(image_shape)
+        )
+        orientation.update(
+            image_id=image_id, phase=orientation_phase, sample_axis=sample_axis,
+            expected_verdict="as_is", code_commit=self.code_commit,
+        )
+        log = logging.info if orientation["status"] == "PASS" else logging.error
+        log("Orientation check %s: %s (corr as-is %.3f / x-flip %.3f, IoU %.3f / %.3f, axis %s)",
+            image_id, orientation["status"], orientation["corr_asis"], orientation["corr_xflip"],
+            orientation["iou_asis"], orientation["iou_xflip"], sample_axis)
         iof_flat = iof_data.reshape(-1)
         yy, xx = np.indices(image_shape)
 
@@ -722,8 +862,17 @@ class GeometryEngine:
 
         # POSIX ATOMIC TRANSFORMATION
         try:
-            df.to_parquet(tmp_path, engine="pyarrow", index=False)
-            tmp_path.replace(output_path) 
+            import json
+
+            import pyarrow as pa
+            import pyarrow.parquet as pq
+
+            table = pa.Table.from_pandas(df, preserve_index=False)
+            meta = dict(table.schema.metadata or {})
+            meta[b"vesta_geometry_orientation"] = json.dumps(orientation).encode()
+            pq.write_table(table.replace_schema_metadata(meta), tmp_path)
+            tmp_path.replace(output_path)
+            (output_phase_dir / f"{image_id}_orientation.json").write_text(json.dumps(orientation))
         except Exception as e:
             if tmp_path.exists():
                 tmp_path.unlink()

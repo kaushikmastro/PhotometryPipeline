@@ -46,58 +46,68 @@ fourth stale-path incident this month, not a second). Installed Python package
 
 ## CRITICAL: pixel-geometry bugs (Oct 2026)
 
-**Every geometry product ground before the fix on branch `fix/pixel-ray-orientation`
-(commit `a94b0cb`; pre-fix state tagged `pre-mirror-fix` = `295b834`) pairs each pixel's
-I/F with the wrong geometry, and every number derived from those products is
-invalid until regenerated.** Two independent bugs, both in
-`src/photometry_etl/etl/geometry_engine.py`:
+Two independent bugs in `src/photometry_etl/etl/geometry_engine.py`. Pre-fix state is
+tagged `pre-mirror-fix` (`295b834`). **The first fix (`a94b0cb`, PR #16) assumed the mirror
+was universal and was WRONG for HAMO/LAMO; branch `fix/orientation-per-phase` replaces it
+with an explicit per-phase orientation plus a per-image check.**
 
-**1. X-mirror (`compute_pixel_rays`).** The old code bilinearly interpolated the four
-`spiceypy.getfov()` boundary vectors assuming c0=top-left (row 0, col 0), c1=top-right.
-For DAWN_FC2 (`dawn_fc_v02.ti`, `FOV_CLASS_SPEC='ANGLES'`, REF=+X) `getfov` returns
-c0=(+X,+Y), c1=(−X,+Y), c2=(−X,−Y), c3=(+X,−Y), while the IK ("Pixel (0,0) is in the
-lower left corner", +X right, +Y down) puts sample 0 at −X and line 0 at +Y. So column 0
-looked toward +X: each image's I/F carries the geometry of pixel (1023 − x, y). Rows
-were correct. Evidence: FC21B0006203_11236015531F1B corr(iof, Lommel-Seeliger) = −0.26
-as ground, +0.45 after `np.fliplr(iof)`, craters align only after the flip;
-FC21B0006719_11241181536F1C x-profile corr −0.61 → +0.89; getfov order and IK
-convention confirmed independently outside Curta with NAIF's kernel. It affects
-**every image**, independent of phase, version letter (F1B–F1I are product versions,
-all F1 clear) or reader path (all Survey/LAMO raw files are `.IMG` via
-`PDS3Image.open`). `CORRECT` labels in `outputs/diagnostics/xmirror_classification.csv`
-are classifier misses (close-ups / weak incidence gradients), not unaffected images.
-The approach golden layer's `predict_target_pixel` used the same ray grid, so its
-SPICE-seeded target column was mirrored too.
+**1. X-mirror — phase-dependent, root cause OPEN.** The pre-fix `compute_pixel_rays`
+interpolated the four `getfov()` corners assuming c0 = (row 0, col 0); for DAWN_FC2 getfov
+returns c0=(+X,+Y), c1=(−X,+Y), c2=(−X,−Y), c3=(+X,−Y), so column 0 looked toward +X
+(`dawn_fc_v02.ti` puts sample 0 at −X). Whether that is wrong depends on the image:
+- **Survey: mirrored by the old code.** DSK pilot on FC21B0006203…F1B regenerated with
+  column 0 → −X: corr(iof, LS) **+0.451** as-is vs −0.263 for the old product; all 7
+  Survey images in the ellipsoid raw-vs-SPICE test agree (limb frames decisively, lit-mask
+  IoU 0.88–0.97 vs ≤ 0.62).
+- **HAMO / LAMO: the old code was right.** DSK pilots: HAMO FC21B0009251 old +0.368 vs
+  new +0.068; LAMO FC21B3021977 old +0.507 vs new −0.401. Ellipsoid test: HAMO 3/3 and
+  LAMO 4/5 favour the old column direction (ellipsoid is weak for close-ups; the DSK
+  pilots are the evidence). Rows are correct everywhere (y-flip IoU ≤ 0.02).
+- **Why the phases differ is unknown.** PDS labels (CALLIOPE 3.01,
+  `SAMPLE_DISPLAY_DIRECTION="RIGHT"`, `LINE_DISPLAY_DIRECTION="UP"`), file layout, reader
+  path (`.IMG` via `PDS3Image.open` everywhere) and code (no array flips anywhere) are
+  identical; a mirror cannot come from attitude. Where the switch happens (date, phase,
+  product) is being mapped with more DSK pilots.
+- `CORRECT` labels in `outputs/diagnostics/xmirror_classification.csv` for HAMO/LAMO were
+  **right**, not classifier misses; its `MIRRORED` labels outside Survey need re-checking.
 
-**2. Exposure time (`_extract_observation_et`).** PDS labels give
-`EXPOSURE_DURATION = 10.000 <millisecond>`; pvl 1.3.2 parses that as
-`Quantity(value=10.0, units='millisecond')` and `float()` returns `10.0`, which was then
-used as seconds. Mid-exposure ET was 0.5 × exposure_ms **seconds** late (4.995 s for a
-10 ms frame). Pointing shift per image: see `/scratch/$USER/mirror_audit/pinhole_truth.csv`
-(job 26687237).
-
-**Fix (`a94b0cb`).** Rays come from the IK pinhole model with an explicit convention,
-and the grid is checked against `getfov` corners by sign (raises on mismatch);
+**2. Exposure time (`_extract_observation_et`) — universal, fixed.** pvl parses
+`EXPOSURE_DURATION = 10.000 <millisecond>` as `Quantity(value=10.0, units='millisecond')`;
+`float()` gave `10.0`, used as seconds, so mid-exposure ET was 0.5 × exposure_ms seconds
+late (4.0–10.0 s on the 15 test images). Measured shift of a fixed surface point
+(job 26689818): **Survey 0.9–3.6 px, HAMO 6.6–7.4 px, LAMO 34–49 px**.
 `exposure_duration_seconds()` reads the unit and rejects unitless values.
 
-| quantity | convention after the fix |
+**Fix (branch `fix/orientation-per-phase`).** `SAMPLE_AXIS_BY_PHASE` in `geometry_engine.py`:
+Survey `col0_minus_x`, HAMO and LAMO `col0_plus_x`; any other phase (RC, approach, cruise,
+unknown path) raises before any SPICE work. Rays come from the IK pinhole model with that
+axis; the grid is checked against `getfov` corners by sign. After geometry, every image
+gets `orientation_check()` (corr(iof, LS) and lit-mask IoU, as-is vs x-flipped); the
+scores and verdict go into the parquet metadata (`vesta_geometry_orientation`), a
+`<image_id>_orientation.json` sidecar, and `orientation_manifest.csv` at the end of
+`run_geometry.py`. Status PASS / FAILED (x-flipped wins) / FLAGGED (undetermined);
+**downstream builds use PASS images only.**
+
+| quantity | convention |
 |---|---|
 | array row / column | PDS line / sample, exactly as `PDS3Image.open` returns the image |
-| camera x | `(col − CCD_CENTER[0]) · IFOV[0]` — column 0 is −X |
-| camera y | `(CCD_CENTER[1] − row) · IFOV[1]` — row 0 is +Y |
+| camera x | `s · (col − CCD_CENTER[0]) · IFOV[0]`, s = +1 Survey (col 0 → −X), −1 HAMO/LAMO (col 0 → +X) |
+| camera y | `(CCD_CENTER[1] − row) · IFOV[1]` — row 0 is +Y, all phases |
 | boresight | +Z; ray = normalize(x, y, 1); distortion not modelled |
 | `getfov` corners | (+X,+Y), (−X,+Y), (−X,−Y), (+X,−Y) — matched by sign, never by order |
 | ET | SCLK start + 0.5 × EXPOSURE_DURATION converted to seconds |
 
-**INVALIDATED (regenerate before any use):** every per-pixel geometry product —
-`geometry/gaskell_dsk256_110825/` (Survey, HAMO, LAMO, RC, approach),
-`geometry/gaskell_256/`, `geometry/gaskell_256_legacy/`, `geometry/ellipsoid/`,
-`geometry/dsk256/`, `04_geometry_tables_fast/`; every silver parquet (`silver/dsk256/*`,
-`silver/gaskell_dsk256_110825/DR_*`); every golden cube in `data/golden/`, including
-`approach_disk_integrated_f1b.parquet`; every fit and diagnostic built on them — the
-committed Case 1 and Config B numbers, all CV_trend/CV_other decompositions, albedo
-heterogeneity and spatial residual maps, disk-integrated phase curves, HAMO/LAMO QGIS
-photometric corrections, the approach aperture validation, and the pending MCMC.
+**INVALIDATED (regenerate before any use):**
+- Mirror: every **Survey** geometry product (`geometry/gaskell_dsk256_110825/survey`,
+  `geometry/gaskell_256/survey`, `geometry/dsk256/survey`, `geometry/ellipsoid/survey`,
+  `04_geometry_tables_fast/survey`) and everything built from them — Survey silver
+  (`silver/dsk256/*`, `DR_survey_*`), Survey golden cubes, the committed Case 1 / Config B
+  fits, all CV_trend/CV_other decompositions, albedo heterogeneity and spatial maps.
+- ET (all phases, smaller): every geometry product of every phase is ET-shifted; HAMO is
+  a few pixels, LAMO tens of pixels — HAMO/LAMO products, the QGIS photometric
+  corrections and the approach golden layer need regenerating for ET, not for the mirror.
+- RC and approach orientation is unknown until piloted; the approach golden builder now
+  raises instead of guessing.
 
 **RETRACTED claims** (wrong independently of the geometry bug):
 - *r = 0.81 between CV_other and within-bin I/F spread* — from
@@ -114,18 +124,17 @@ photometric corrections, the approach aperture validation, and the pending MCMC.
 - *CV_RMSE 9.22% = CV_trend 5.1% ⊕ CV_other 7.7%* — appears in no job output, notebook or
   history; first seen in this file at commit `9d113ac` (2026-08-03). Untraceable.
 
-**Regeneration plan** (needs approval; nothing regenerated yet): pilot one image
-(FC21B0006203…F1B, done on the branch into `/scratch/$USER/mirror_audit/pilot/`), then
-regrind `gaskell_dsk256_110825` (≈17.5k images, ≈16–17 h at ≈1,050 img/h with 8×14-CPU
-jobs) and, if Case 1 is to be kept on the same shape model, `gaskell_256` (≈7k images,
-≈7 h); rebuild silver → golden; refit Case 1/2/3 and rerun diagnostics. Do not overwrite
-old products in place until the new ones validate; keep the tag for comparison.
+**Regeneration plan.** Survey first: grind `gaskell_dsk256_110825_v2/survey/` on /scratch
+with the per-phase code (tagged with the commit), keep only PASS images, rebuild silver
+`DR_survey_gaskell_dsk256_110825_v2.parquet` and the i,e<50 golden cube, then refit Case 1.
+HAMO/LAMO only after their ET-shifted products are judged worth regrinding. Never overwrite
+the old products; keep the `pre-mirror-fix` tag for comparison.
 
-**Validation rule for any new or regenerated geometry:** before use, the image must pass
-(1) corr(iof, LS) > 0 with no flip, (2) limb/shadow mask IoU as-is ≥ x-flipped, and
-(3) sub-spacecraft / sub-solar pixels from direct SPICE projection agree with the
-parquet's minimum-emission pixel and incidence gradient. `pytest --run-slow
-tests/test_geometry_engine.py` pins (1) on FC21B0006203…F1B.
+**Validation rule for any new or regenerated geometry:** use only images whose
+`orientation_check` status is PASS (corr(iof, LS) as-is beats x-flipped by ≥ 0.05 without
+losing lit-mask IoU). `pytest --run-slow tests/test_geometry_engine.py -k orientation_controls`
+pins the three controls (Survey on the v2 product, HAMO/LAMO on the v1 products; roots
+overridable with `GEOMETRY_V2_ROOT` / `GEOMETRY_V1_ROOT`).
 
 ## Committed Case 1 Result (preliminary DSK, illuminated regime — FULL DATA) — PRE-FIX, INVALIDATED
 
