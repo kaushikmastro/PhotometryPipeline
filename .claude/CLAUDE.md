@@ -136,10 +136,58 @@ losing lit-mask IoU). `pytest --run-slow tests/test_geometry_engine.py -k orient
 pins the three controls (Survey on the v2 product, HAMO/LAMO on the v1 products; roots
 overridable with `GEOMETRY_V2_ROOT` / `GEOMETRY_V1_ROOT`).
 
+## CRITICAL: Hapke macroscopic-roughness bug (Oct 2026)
+
+**`HapkeModel` with `enable_roughness=True` did not implement Hapke (2012) ch. 12
+(eqs. 12.45-12.55, identical to Hapke 1984) before branch `fix/hapke-roughness`.**
+Roughness *brightened* the surface instead of darkening it. Five deviations in
+`src/photometry/models/hapke.py::_reflectance_numpy`:
+
+1. The effective cosines omitted their shared denominators `2 - E1(e) - (psi/pi)E1(i)`
+   (i <= e) and `2 - E1(i) - (psi/pi)E1(e)` (e < i).
+2. They omitted `cos(psi)` on `E2(e)` in mu0e (i <= e) and on `E2(i)` in mue (e < i).
+3. Two E2 arguments were swapped: mue (i <= e) used `E2(i) - s2*E2(i)` instead of
+   `E2(e) - s2*E2(i)`; mu0e (e < i) used `E2(e) - s2*E2(e)` instead of `E2(i) - s2*E2(e)`.
+4. The shadowing function was `(mue/mu)(mu0/mu0e)*chi/[1 - f*E1 - (1-f)*E1]` instead of
+   `S = (mue/eta(e))(mu0/eta(i))*chi/[1 - f + f*chi*mu0/eta(i)]` (`mu/eta(e)` for e < i),
+   with eta from eq. 12.48 never computed. This was the dominant error.
+5. mu0e, mue were never used: `mu0/(mu0+mu)` and `H(mu0)H(mu)` must be evaluated at the
+   effective cosines (eq. 12.55).
+Correct throughout: theta_bar and psi in radians, `cos psi = (cos alpha - cos i cos e)/
+(sin i sin e)`, E1/E2 cot forms (written as 1/tan), `f(psi) = exp(-2 tan(psi/2))`, branch
+`i <= e`, S multiplying the result.
+
+**Evidence** (audit 2026-10-25; w=0.5, g=-0.3, B0=1.03, h=0.04). I/F relative to
+theta_bar=0 at theta_bar = 10/20/30 deg: (i,e,alpha) = (60,30,60) old 1.067/1.327/1.568,
+correct 0.993/0.935/0.840; (60,60,90) old 1.076/0.983/0.834, correct 0.984/0.767/0.537.
+Over 4212 (i, e, psi) geometries the old code brightened 54-63% of them, was off by up to
+x8000 at grazing geometry, and broke reciprocity (I/F/mu0 symmetric under i <-> e) by up
+to x25. The corrected code agrees with two independent implementations of the equations
+(a scalar reference and a vectorised one) to < 1e-7 and is reciprocal to 1e-15.
+History: a May 2026 session "fixed" this block *towards* the simplified form (removing
+cos psi and the denominators, replacing S), and `tests/test_hapke_physics.py`'s reference
+encoded the same form, so the error was invisible to the suite.
+
+**INVALIDATED (in addition to the geometry list above):** every fit with free or fixed
+theta_bar before the fix -- the committed Case 1 (w=0.46993, g=-0.33688, theta_bar=8.2662,
+fRMS 10.902%), Config B, the superseded 1% fit, Case 2/3, every theta_bar quoted anywhere,
+and the w, g fitted alongside them (roughness was degenerate with w/g in the wrong
+direction). Smooth Hapke (enable_roughness=False) and the baseline models are unaffected.
+**Geometry products are unaffected** (this bug is in the photometric model, not the ETL).
+
+**Lesson.** Physics tests must be independent of the code they test: a reference written by
+transcribing the implementation proves nothing. Every reflectance model now also has
+implementation-independent invariant tests (`tests/test_reflectance_invariants.py`:
+reciprocity, theta_bar -> 0 smooth limit) and the roughness has pinned values from an
+independent Hapke 2012 implementation plus darkening/branch-continuity checks
+(`tests/test_hapke_roughness.py`). Note Hapke's own S can exceed 1 (up to ~1.07 at large e,
+alpha) and rough I/F can exceed smooth near alpha = 0 at grazing i = e -- neither is a bug.
+
 ## Committed Case 1 Result (preliminary DSK, illuminated regime — FULL DATA) — PRE-FIX, INVALIDATED
 
-**Computed on x-mirrored, ET-shifted geometry (see CRITICAL section above). Kept for
-comparison only; do not quote until refit on regenerated geometry.**
+**Computed on x-mirrored, ET-shifted geometry AND with the incorrect Hapke roughness (see
+both CRITICAL sections above). Kept for comparison only; do not quote until refit on
+regenerated geometry with the corrected model.**
 
 | parameter | value | source |
 |---|---|---|

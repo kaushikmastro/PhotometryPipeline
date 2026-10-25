@@ -10,7 +10,6 @@ from photometry.core.types import Backend, GeometryBatch, ParameterPrior
 from photometry.models.base import BasePhotometricModel
 
 
-
 @dataclass
 class HapkeModel(BasePhotometricModel):
     """
@@ -109,9 +108,6 @@ class HapkeModel(BasePhotometricModel):
                 bracket = r0 + ((1.0 - 2.0 * r0 * x_safe) / 2.0) * np.log((1.0 + x_safe) / x_safe)
                 return 1.0 / (1.0 - w * x_safe * bracket)
 
-        h_mu0 = _h_function(mu0)
-        h_mu = _h_function(mu)
-
         # ---------------------------------------------------------
         # SHOE: B_SH(α) = B0 / (1 + (1/h)·tan(α/2))
         # Li et al. 2013, Eq. 2 — SHOE only, no CBOE
@@ -125,85 +121,77 @@ class HapkeModel(BasePhotometricModel):
             b_sh = 0.0
 
         # ---------------------------------------------------------
-        # Macroscopic Roughness S(i, e, α, θ̄)
-        # Simplified Hapke (1984) form as used by Li et al. (2013).
-        # This is the standard disk-resolved implementation — no denominator
-        # inside the effective-cosine expressions.
+        # Macroscopic roughness, Hapke (2012) ch. 12 (= Hapke 1984), eqs. 12.45-12.55.
+        # The rough-surface I/F is the smooth expression evaluated at the effective cosines
+        # mu0e, mue, multiplied by the shadowing function S:
+        #   I/F = (w/4) * mu0e/(mu0e+mue) * [(1+B)P + H(mu0e)H(mue) - 1] * S(i, e, psi)
+        # psi is the azimuth between the incidence and emission planes,
+        #   cos psi = (cos alpha - cos i cos e) / (sin i sin e).
         # ---------------------------------------------------------
-
         if self.enable_roughness:
+            theta_rad = np.deg2rad(float(np.clip(float(self.parameters["theta_bar"]), 1e-4, 60.0)))
+            tan_t = np.tan(theta_rad)
+            cot_t = 1.0 / tan_t
+            chi = 1.0 / np.sqrt(1.0 + np.pi * tan_t**2)                                  # 12.45a
 
-            theta_bar_deg = float(self.parameters["theta_bar"])
-            theta_bar_deg = np.clip(theta_bar_deg, 1e-4, 60.0)
-            theta_rad = np.deg2rad(theta_bar_deg)
+            sin_i, sin_e = np.sin(incidence), np.sin(emission)
+            sin_ie = sin_i * sin_e
+            with np.errstate(invalid="ignore", divide="ignore"):
+                cos_psi = np.where(sin_ie > eps, (cos_alpha - mu0 * mu) / np.where(sin_ie > eps, sin_ie, 1.0), 1.0)
+            cos_psi = np.clip(cos_psi, -1.0, 1.0)
+            psi = np.arccos(cos_psi)
+            sin2_half_psi = np.sin(psi / 2.0) ** 2
+            with np.errstate(over="ignore"):
+                f_psi = np.where(psi < np.pi, np.exp(-2.0 * np.tan(psi / 2.0)), 0.0)          # 12.53
 
-            # Step A: azimuth angle ψ and base quantities
-            cos_psi = (cos_alpha - mu0 * mu) / np.clip(np.sin(incidence) * np.sin(emission), eps, None)
-            psi = np.arccos(np.clip(cos_psi, -1.0, 1.0))
-            f_psi = np.exp(-2.0 * np.tan(psi / 2.0))
+            # cot(x) -> inf at x = 0 (normal incidence/emission), where E1 = E2 = exp(-inf) = 0:
+            # the overflow is the intended limit, so it is silenced rather than clipped.
+            def _cot(x: np.ndarray) -> np.ndarray:
+                with np.errstate(divide="ignore", over="ignore"):
+                    return np.where(x > 0.0, 1.0 / np.tan(np.where(x > 0.0, x, 1.0)), np.inf)
 
-            tan_theta = np.tan(theta_rad)
-            chi = 1.0 / np.sqrt(1.0 + np.pi * tan_theta**2)
+            def _e1(x: np.ndarray) -> np.ndarray:                                          # 12.45b
+                with np.errstate(over="ignore"):
+                    return np.exp(-(2.0 / np.pi) * cot_t * _cot(x))
 
-            # Step B: shadowing integrals E1, E2 (Hapke 1984)
-            def _e1(x_tan: np.ndarray) -> np.ndarray:
-                x_safe = np.clip(x_tan, eps, None)
-                return np.exp(-2.0 / (np.pi * tan_theta * x_safe))
+            def _e2(x: np.ndarray) -> np.ndarray:                                          # 12.45c
+                with np.errstate(over="ignore"):
+                    return np.exp(-(1.0 / np.pi) * cot_t**2 * _cot(x) ** 2)
 
-            def _e2(x_tan: np.ndarray) -> np.ndarray:
-                x_safe = np.clip(x_tan, eps, None)
-                return np.exp(-1.0 / (np.pi * (tan_theta**2) * (x_safe**2)))
+            def _eta(x: np.ndarray) -> np.ndarray:                                         # 12.48
+                return chi * (np.cos(x) + np.sin(x) * tan_t * _e2(x) / (2.0 - _e1(x)))
 
-            tan_i = np.clip(np.tan(incidence), eps, None)
-            tan_e = np.clip(np.tan(emission), eps, None)
-
-            e1_i, e1_e = _e1(tan_i), _e1(tan_e)
-            e2_i, e2_e = _e2(tan_i), _e2(tan_e)
-
-            sin_i = np.sin(incidence)
-            sin_e = np.sin(emission)
-            sin2_psi = np.sin(psi / 2.0)**2  # sin²(ψ/2)
-
-            mu0_eff = np.empty_like(mu0)
-            mu_eff = np.empty_like(mu)
-            shadow_denom = np.empty_like(mu0)
-
+            e1_i, e1_e, e2_i, e2_e = _e1(incidence), _e1(emission), _e2(incidence), _e2(emission)
+            eta_i, eta_e = _eta(incidence), _eta(emission)
             ile = incidence <= emission
 
-            # CASE 1: i ≤ e  (Hapke 1984, simplified form used by Li et al. 2013)
-            # μ₀ₑ = χ[μ₀ + sin(i)·tan(θ̄)·(E₂(e) + sin²(ψ/2)·E₂(i))]
-            # μₑ  = χ[μ  + sin(e)·tan(θ̄)·(E₂(i) − sin²(ψ/2)·E₂(i))]
-            # Denom = 1 − f(ψ)·E₁(i) − (1−f(ψ))·E₁(e)
-
-            mu0_eff[ile] = chi * (mu0[ile] + sin_i[ile] * tan_theta * (e2_e[ile] + sin2_psi[ile] * e2_i[ile]))
-            mu_eff[ile]  = chi * (mu[ile]  + sin_e[ile] * tan_theta * (e2_i[ile] - sin2_psi[ile] * e2_i[ile]))
-            shadow_denom[ile] = 1.0 - f_psi[ile] * e1_i[ile] - (1.0 - f_psi[ile]) * e1_e[ile]
-
-            # CASE 2: i > e  (Hapke 1984, simplified form used by Li et al. 2013)
-            # μ₀ₑ = χ[μ₀ + sin(i)·tan(θ̄)·(E₂(e) − sin²(ψ/2)·E₂(e))]
-            # μₑ  = χ[μ  + sin(e)·tan(θ̄)·(E₂(i) + sin²(ψ/2)·E₂(e))]
-            # Denom = 1 − f(ψ)·E₁(e) − (1−f(ψ))·E₁(i)
-
-            mu0_eff[~ile] = chi * (mu0[~ile] + sin_i[~ile] * tan_theta * (e2_e[~ile] - sin2_psi[~ile] * e2_e[~ile]))
-            mu_eff[~ile]  = chi * (mu[~ile]  + sin_e[~ile] * tan_theta * (e2_i[~ile] + sin2_psi[~ile] * e2_e[~ile]))
-            shadow_denom[~ile] = 1.0 - f_psi[~ile] * e1_e[~ile] - (1.0 - f_psi[~ile]) * e1_i[~ile]
-
-            # Step D: S = (μₑ/μ)·(μ₀/μ₀ₑ)·χ/Denom
-            
-            roughness = (mu_eff / np.clip(mu, eps, None)) * (mu0 / np.clip(mu0_eff, eps, None))
-            roughness *= chi / np.clip(shadow_denom, eps, None)
-
+            # i <= e (12.46, 12.47, 12.52) and e <= i (12.50, 12.51, 12.54)
+            d_ile = 2.0 - e1_e - (psi / np.pi) * e1_i
+            d_eli = 2.0 - e1_i - (psi / np.pi) * e1_e
+            mu0_eff = np.where(
+                ile,
+                chi * (mu0 + sin_i * tan_t * (cos_psi * e2_e + sin2_half_psi * e2_i) / d_ile),
+                chi * (mu0 + sin_i * tan_t * (e2_i - sin2_half_psi * e2_e) / d_eli),
+            )
+            mu_eff = np.where(
+                ile,
+                chi * (mu + sin_e * tan_t * (e2_e - sin2_half_psi * e2_i) / d_ile),
+                chi * (mu + sin_e * tan_t * (cos_psi * e2_i + sin2_half_psi * e2_e) / d_eli),
+            )
+            shadow = (mu_eff / eta_e) * (mu0 / eta_i) * chi / np.where(
+                ile,
+                1.0 - f_psi + f_psi * chi * mu0 / eta_i,
+                1.0 - f_psi + f_psi * chi * mu / eta_e,
+            )
         else:
-            roughness = 1.0
+            mu0_eff, mu_eff, shadow = mu0, mu, 1.0
 
         # ---------------------------------------------------------
-        # Final IMSA equation (Li et al. 2013, Eq. 1)
-        # I/F = (ϖ₀/4)·(μ₀/(μ₀+μ))·[(1+B_SH)·P + H(μ₀)·H(μ) − 1]·S
+        # IMSA (Li et al. 2013, Eq. 1; Hapke 2012 eq. 12.55 with roughness)
         # ---------------------------------------------------------
-
-        base = (w / 4.0) * (mu0 / np.clip(mu0 + mu, eps, None))
-        scatter = (1.0 + b_sh) * phase_function + h_mu0 * h_mu - 1.0
-        iof = base * scatter * roughness
+        base = (w / 4.0) * (mu0_eff / np.clip(mu0_eff + mu_eff, eps, None))
+        scatter = (1.0 + b_sh) * phase_function + _h_function(mu0_eff) * _h_function(mu_eff) - 1.0
+        iof = base * scatter * shadow
 
         valid = (mu0 > 0.0) & (mu > 0.0)
         return np.where(valid & np.isfinite(iof), iof, 0.0)
